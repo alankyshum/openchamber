@@ -27,12 +27,18 @@ interface QueuedMessageChipProps {
     target: MessageQueueTarget;
     onEdit: (message: QueuedMessage) => void;
     onSend: (message: QueuedMessage) => void;
+    onRetry: (message: QueuedMessage) => void;
+    onRestore: (message: QueuedMessage) => void;
+    onCopy: (message: QueuedMessage) => void;
+    onDismiss: (message: QueuedMessage) => void;
 }
 
-const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessageChipProps) => {
+const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onRetry, onRestore, onCopy, onDismiss }: QueuedMessageChipProps) => {
     const { t } = useI18n();
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id });
+    const state = message.admissionState ?? 'local';
+    const serverOwned = state === 'admitted' || state === 'pending-admission' || state === 'admission-unknown';
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id, disabled: serverOwned });
 
     // Get first line of message, truncated
     const firstLine = React.useMemo(() => {
@@ -54,7 +60,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
             style={{ transform: CSS.Translate.toString(transform), transition }}
             className={cn('flex min-w-0 items-center gap-2 py-1', isDragging && 'z-10 opacity-60')}
         >
-            <button
+            {!serverOwned && <button
                 type="button"
                 {...attributes}
                 {...listeners}
@@ -62,14 +68,19 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
                 aria-label={t('chat.queuedMessage.reorderAria')}
             >
                 <Icon name="draggable" className="h-4 w-4" aria-hidden="true" />
-            </button>
+            </button>}
             <span className="min-w-0 flex-1 truncate typography-ui-label text-foreground">
                 {firstLine || t('chat.queuedMessage.empty')}
                 {attachmentCount > 0 && (
                     <span className="ml-1 text-muted-foreground">{t('chat.queuedMessage.attachments', { count: attachmentCount })}</span>
                 )}
             </span>
-            <Button
+            {state === 'admission-failed' && <span className="text-xs text-destructive">{t('chat.queuedMessage.admissionFailed')}</span>}
+            {state === 'admission-failed' && <Button type="button" variant="secondary" size="xs" onClick={() => onRestore(message)}>{t('chat.queuedMessage.restore')}</Button>}
+            {state === 'admission-failed' && <Button type="button" variant="secondary" size="xs" onClick={() => onRetry(message)} aria-label={t('chat.queuedMessage.retryAdmission')}>{t('chat.queuedMessage.retryAdmission')}</Button>}
+            {state === 'admission-unknown' && <Button type="button" variant="secondary" size="xs" title={t('chat.queuedMessage.admissionUnknown')} onClick={() => onCopy(message)}>{t('chat.queuedMessage.copy')}</Button>}
+            {state === 'admission-unknown' && <Button type="button" variant="secondary" size="xs" onClick={() => onDismiss(message)}>{t('chat.queuedMessage.dismiss')}</Button>}
+            {state === 'local' && <Button
                 type="button"
                 variant="secondary"
                 size="xs"
@@ -77,8 +88,8 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
             >
                 <Icon name="edit" className="h-3 w-3" aria-hidden="true" />
                 {t('chat.queuedMessage.edit')}
-            </Button>
-            <Button
+            </Button>}
+            {state === 'local' && <Button
                 type="button"
                 variant="secondary"
                 size="xs"
@@ -86,15 +97,25 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
             >
                 <Icon name="send-plane" className="h-3 w-3" aria-hidden="true" />
                 {t('chat.queuedMessage.send')}
-            </Button>
-            <button
+            </Button>}
+            {state === 'local' && <button
                 type="button"
                 onClick={() => removeFromQueue(target, message.id)}
-                className="flex items-center justify-center h-6 w-6 flex-shrink-0 hover:bg-[var(--interactive-hover)] rounded-full transition-colors"
+                className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--interactive-hover)]"
                 aria-label={t('chat.queuedMessage.removeAria')}
             >
                 <Icon name="close" className="h-4 w-4 text-muted-foreground" />
-            </button>
+            </button>}
+            {state === 'pending-admission' && <span
+                className="text-xs text-muted-foreground"
+                title={t('chat.queuedMessage.selectionLimitation')}
+            >{t('chat.queuedMessage.admissionPending')}</span>}
+            {state === 'admitted' && <span
+                className="text-xs text-muted-foreground"
+                title={t('chat.queuedMessage.selectionLimitation')}
+            >{t('chat.queuedMessage.admitted')} · {t('chat.queuedMessage.selectionLimitation')}</span>}
+            {state === 'admission-unknown' && <span className="text-xs text-destructive">{t('chat.queuedMessage.admissionUnknown')}</span>}
+            {state === 'local' && <span className="text-xs text-muted-foreground">{t('chat.queuedMessage.localFallback')}</span>}
         </div>
     );
 });
@@ -104,11 +125,15 @@ QueuedMessageChip.displayName = 'QueuedMessageChip';
 interface QueuedMessageChipsProps {
     onEditMessage: (content: string, attachments?: QueuedMessage['attachments']) => void;
     onSendMessage: (messageId: string) => void;
+    onRetryAdmission?: (message: QueuedMessage) => void;
+    onRestoreAdmission?: (message: QueuedMessage) => void;
+    onCopyAdmission?: (message: QueuedMessage) => void;
+    onDismissAdmission?: (message: QueuedMessage) => void;
 }
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
-export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: QueuedMessageChipsProps) => {
+export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage, onRetryAdmission = () => {}, onRestoreAdmission = () => {}, onCopyAdmission = () => {}, onDismissAdmission = () => {} }: QueuedMessageChipsProps) => {
     const { t } = useI18n();
     const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
     // Must use the same resolution the composer used to build the queue key —
@@ -144,8 +169,9 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
     const handleDragEnd = React.useCallback((event: DragEndEvent) => {
         const { active, over } = event;
         if (!over || active.id === over.id || !target) return;
+        if (queuedMessages.some((message) => (message.admissionState ?? 'local') !== 'local')) return;
         reorderQueue(target, String(active.id), String(over.id));
-    }, [target, reorderQueue]);
+    }, [target, reorderQueue, queuedMessages]);
 
     const handleEdit = React.useCallback((message: QueuedMessage) => {
         if (!target) return;
@@ -194,6 +220,10 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
                                     target={target}
                                     onEdit={handleEdit}
                                     onSend={handleSend}
+                                    onRetry={onRetryAdmission}
+                                    onRestore={onRestoreAdmission}
+                                    onCopy={onCopyAdmission}
+                                    onDismiss={onDismissAdmission}
                                 />
                             ))}
                         </div>

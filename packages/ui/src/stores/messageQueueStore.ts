@@ -45,6 +45,16 @@ export interface QueuedMessage {
     content: string;
     attachments?: AttachedFile[];
     createdAt: number;
+    /** Ownership of this item. Only local items may be sent by the client. */
+    admissionState?: 'local' | 'pending-admission' | 'admitted' | 'admission-failed' | 'admission-unknown';
+    /** Stable id supplied to the v2 admission endpoint. */
+    clientMessageId?: string;
+    /** Minimal server acknowledgement retained as server proof/metadata. */
+    admissionAck?: {
+        admittedSeq: number;
+        timeCreated: number;
+        promotedSeq?: number;
+    };
     /** Send config captured at queue time — used as-is when auto-sending */
     sendConfig?: {
         providerID: string;
@@ -62,6 +72,57 @@ export type MessageQueueTarget = {
 
 const MAX_QUEUE_TARGETS = 50;
 const MAX_MESSAGES_PER_QUEUE = 20;
+const MAX_ADMITTED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_ADMITTED_HISTORY = 20;
+const MAX_PENDING_ADMISSIONS = 20;
+
+const capQueueMessages = (messages: QueuedMessage[]): QueuedMessage[] => {
+    const admittedCandidates = messages
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => message.admissionState === 'admitted')
+        .filter(({ message }) => Date.now() - message.createdAt < MAX_ADMITTED_AGE_MS);
+    const pendingCandidates = messages
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => message.admissionState === 'pending-admission');
+    const recoverableCandidates = messages
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => message.admissionState !== 'admitted' && message.admissionState !== 'pending-admission')
+        .slice(-MAX_MESSAGES_PER_QUEUE);
+    const retained = new Map<number, QueuedMessage>();
+    for (const { message, index } of admittedCandidates.slice(-MAX_ADMITTED_HISTORY)) {
+        retained.set(index, { ...message, attachments: undefined, sendConfig: undefined });
+    }
+    for (const { message, index } of pendingCandidates.slice(-MAX_PENDING_ADMISSIONS)) retained.set(index, message);
+    for (const { message, index } of recoverableCandidates) retained.set(index, message);
+    return messages.flatMap((_, index) => {
+        const message = retained.get(index);
+        return message ? [message] : [];
+    });
+};
+
+/** Hydrate persisted state conservatively: an interrupted admission is unknown. */
+export const normalizePersistedQueueMessages = (
+    queuedMessages: Record<string, QueuedMessage[]>,
+): Record<string, QueuedMessage[]> => {
+    const normalized: Record<string, QueuedMessage[]> = {};
+    for (const [key, messages] of Object.entries(queuedMessages)) {
+        const hydrated = messages.map((message): QueuedMessage => {
+                const interrupted = message.admissionState === 'pending-admission';
+                return {
+                    ...message,
+                    // An interrupted admission is intentionally copy/dismiss
+                    // only. Drop data URLs while migrating it so a stale
+                    // uncertain item cannot retain binary payloads forever.
+                    ...(interrupted
+                        ? { attachments: undefined, sendConfig: undefined }
+                        : {}),
+                    admissionState: interrupted ? 'admission-unknown' : (message.admissionState ?? 'local'),
+                };
+            });
+        normalized[key] = capQueueMessages(hydrated);
+    }
+    return normalized;
+};
 
 export const createMessageQueueTarget = (
     sessionId: string,
@@ -101,7 +162,7 @@ interface MessageQueueState {
 }
 
 interface MessageQueueActions {
-    addToQueue: (target: MessageQueueTarget, message: Omit<QueuedMessage, 'id' | 'createdAt'>) => void;
+    addToQueue: (target: MessageQueueTarget, message: Omit<QueuedMessage, 'id' | 'createdAt'>) => string;
     removeFromQueue: (target: MessageQueueTarget, messageId: string) => void;
     reorderQueue: (target: MessageQueueTarget, fromId: string, toId: string) => void;
     popToInput: (target: MessageQueueTarget, messageId: string) => QueuedMessage | null;
@@ -112,6 +173,14 @@ interface MessageQueueActions {
     getSendableQueue: (target: MessageQueueTarget) => QueuedMessage[];
     setFollowUpBehavior: (behavior: FollowUpBehavior) => void;
     getQueueForTarget: (target: MessageQueueTarget) => QueuedMessage[];
+    markAdmissionPending: (target: MessageQueueTarget, messageId: string, clientMessageId: string) => void;
+    markAdmissionLocal: (target: MessageQueueTarget, messageId: string) => void;
+    markAdmissionAdmitted: (target: MessageQueueTarget, messageId: string, ack: QueuedMessage['admissionAck']) => void;
+    markAdmissionFailed: (target: MessageQueueTarget, messageId: string) => void;
+    markAdmissionUnknown: (target: MessageQueueTarget, messageId: string) => void;
+    hardDeleteQueue: (target: MessageQueueTarget) => void;
+    recoverAdmissionToInput: (target: MessageQueueTarget, messageId: string) => QueuedMessage | null;
+    dismissAdmissionUnknown: (target: MessageQueueTarget, messageId: string) => void;
 }
 
 type MessageQueueStore = MessageQueueState & MessageQueueActions;
@@ -127,7 +196,10 @@ export const migrateMessageQueueState = (persistedState: unknown, version: numbe
     const state = (persistedState ?? {}) as PersistedMessageQueueState;
     const legacyQueues = version < 2 ? (state.queuedMessages ?? {}) : {};
     return {
-        queuedMessages: version < 2 ? {} : (state.queuedMessages ?? {}),
+        queuedMessages: version < 2 ? {} : Object.fromEntries(Object.entries(state.queuedMessages ?? {}).map(([key, messages]) => [
+            key,
+            normalizePersistedQueueMessages({ [key]: messages })[key] ?? [],
+        ])),
         quarantinedLegacyMessages: {
             ...(state.quarantinedLegacyMessages ?? {}),
             ...legacyQueues,
@@ -153,33 +225,50 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         content: message.content,
                         attachments: message.attachments,
                         createdAt: Date.now(),
+                        admissionState: message.admissionState ?? 'local',
+                        clientMessageId: message.clientMessageId,
+                        admissionAck: message.admissionAck,
                         sendConfig: message.sendConfig,
                     };
 
                     set((state) => {
                         const currentQueue = state.queuedMessages[key] ?? [];
+                        const candidateQueue = [...currentQueue, queuedMessage];
+                        const admitted = candidateQueue.filter((item) => item.admissionState === 'admitted');
+                        const pending = candidateQueue.filter((item) => item.admissionState === 'pending-admission');
+                        const recoverable = candidateQueue.filter((item) => item.admissionState !== 'admitted' && item.admissionState !== 'pending-admission');
                         const queuedMessages = {
                             ...state.queuedMessages,
-                            [key]: [...currentQueue, queuedMessage].slice(-MAX_MESSAGES_PER_QUEUE),
+                            // Server-owned history has its own bound. It must not
+                            // consume slots needed by recoverable local content.
+                            [key]: recoverable.slice(-MAX_MESSAGES_PER_QUEUE)
+                                .concat(pending.slice(-MAX_PENDING_ADMISSIONS))
+                                .concat(admitted.slice(-MAX_ADMITTED_HISTORY)),
                         };
                         const keys = Object.keys(queuedMessages);
                         if (keys.length > MAX_QUEUE_TARGETS) {
-                            keys.sort((left, right) => (
-                                (queuedMessages[left]?.[0]?.createdAt ?? 0) - (queuedMessages[right]?.[0]?.createdAt ?? 0)
-                            ));
+                            keys.sort((left, right) => {
+                                const leftHasLocal = queuedMessages[left]?.some((item) => (item.admissionState ?? 'local') === 'local') ?? false;
+                                const rightHasLocal = queuedMessages[right]?.some((item) => (item.admissionState ?? 'local') === 'local') ?? false;
+                                if (leftHasLocal !== rightHasLocal) return leftHasLocal ? 1 : -1;
+                                return (queuedMessages[left]?.[0]?.createdAt ?? 0) - (queuedMessages[right]?.[0]?.createdAt ?? 0);
+                            });
                             for (const staleKey of keys.slice(0, keys.length - MAX_QUEUE_TARGETS)) delete queuedMessages[staleKey];
                         }
                         return {
                             queuedMessages,
                         };
                     });
+                    return id;
                 },
 
                 removeFromQueue: (target, messageId) => {
                     const key = getMessageQueueKey(target);
                     set((state) => {
                         const currentQueue = state.queuedMessages[key] ?? [];
-                        const newQueue = currentQueue.filter((m) => m.id !== messageId);
+                        // Server-owned items are irreversible from the client.
+                        if (currentQueue.some((message) => message.id === messageId && (message.admissionState ?? 'local') !== 'local')) return state;
+                        const newQueue = currentQueue.filter((m) => m.id !== messageId || (m.admissionState ?? 'local') !== 'local');
                         
                         if (newQueue.length === 0) {
                             const { [key]: _removed, ...rest } = state.queuedMessages;
@@ -205,6 +294,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const fromIndex = currentQueue.findIndex((m) => m.id === fromId);
                         const toIndex = currentQueue.findIndex((m) => m.id === toId);
                         if (fromIndex === -1 || toIndex === -1) return state;
+                        if ((currentQueue[fromIndex].admissionState ?? 'local') !== 'local'
+                            || (currentQueue[toIndex].admissionState ?? 'local') !== 'local') return state;
 
                         const newQueue = currentQueue.slice();
                         const [moved] = newQueue.splice(fromIndex, 1);
@@ -225,7 +316,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     const currentQueue = state.queuedMessages[key] ?? [];
                     const message = currentQueue.find((m) => m.id === messageId);
                     
-                    if (!message) {
+                    if (!message || (message.admissionState ?? 'local') !== 'local') {
                         return null;
                     }
 
@@ -258,7 +349,9 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         // already handed to the server: that send will resolve
                         // and must find its entry to remove or restore.
                         const sending = state.sendingIds[key] ?? [];
-                        const retained = (state.queuedMessages[key] ?? []).filter((m) => sending.includes(m.id));
+                        const retained = (state.queuedMessages[key] ?? []).filter((m) =>
+                            sending.includes(m.id) || (m.admissionState ?? 'local') !== 'local'
+                        );
                         if (retained.length > 0) {
                             return { queuedMessages: { ...state.queuedMessages, [key]: retained } };
                         }
@@ -301,8 +394,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     const state = get();
                     const queue = state.queuedMessages[key] ?? [];
                     const sending = state.sendingIds[key];
-                    if (!sending || sending.length === 0) return queue;
-                    return queue.filter((message) => !sending.includes(message.id));
+                    return queue.filter((message) => !(sending ?? []).includes(message.id)
+                        && (message.admissionState ?? 'local') === 'local');
                 },
 
                 setFollowUpBehavior: (behavior) => {
@@ -313,10 +406,78 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 getQueueForTarget: (target) => {
                     return get().queuedMessages[getMessageQueueKey(target)] ?? [];
                 },
+                markAdmissionPending: (target, messageId, clientMessageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: (state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'pending-admission' as const, clientMessageId } : message) } }));
+                },
+                markAdmissionLocal: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => ({
+                            queuedMessages: {
+                                ...state.queuedMessages,
+                                [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId
+                                    ? { ...message, admissionState: 'local' as const }
+                                    : message)),
+                            },
+                    }));
+                },
+                markAdmissionAdmitted: (target, messageId, admissionAck) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => {
+                        const updated = (state.queuedMessages[key] ?? []).map((message) => message.id === messageId
+                            ? { ...message, admissionState: 'admitted' as const, admissionAck, attachments: undefined, sendConfig: undefined }
+                            : message);
+                        const recoverable = updated.filter((message) => message.admissionState !== 'admitted');
+                        const pending = recoverable.filter((message) => message.admissionState === 'pending-admission');
+                        const actionable = recoverable.filter((message) => message.admissionState !== 'pending-admission');
+                        const admitted = updated.filter((message) => message.admissionState === 'admitted');
+                        return {
+                            queuedMessages: {
+                                ...state.queuedMessages,
+                                [key]: [...actionable.slice(-MAX_MESSAGES_PER_QUEUE), ...pending.slice(-MAX_PENDING_ADMISSIONS), ...admitted.slice(-MAX_ADMITTED_HISTORY)],
+                            },
+                        };
+                    });
+                },
+                markAdmissionFailed: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-failed' as const } : message)) } }));
+                },
+                markAdmissionUnknown: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-unknown' as const, attachments: undefined, sendConfig: undefined } : message)) } }));
+                },
+                recoverAdmissionToInput: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    const message = get().queuedMessages[key]?.find((item) => item.id === messageId);
+                    if (!message || (message.admissionState !== 'admission-failed' && message.admissionState !== 'admission-unknown')) return null;
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: (state.queuedMessages[key] ?? []).filter((item) => item.id !== messageId) } }));
+                    return message;
+                },
+                dismissAdmissionUnknown: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => ({
+                        queuedMessages: {
+                            ...state.queuedMessages,
+                            [key]: (state.queuedMessages[key] ?? []).filter((item) =>
+                                item.id !== messageId || item.admissionState !== 'admission-unknown'),
+                        },
+                    }));
+                },
+                hardDeleteQueue: (target) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => {
+                        const { [key]: _removed, ...queuedMessages } = state.queuedMessages;
+                        const { [key]: _sendingRemoved, ...sendingIds } = state.sendingIds;
+                        void _removed;
+                        void _sendingRemoved;
+                        return { queuedMessages, sendingIds };
+                    });
+                },
             }),
             {
                 name: 'message-queue-store',
-                version: 2,
+                version: 3,
                 storage: createDeferredSafeJSONStorage(),
                 partialize: (state) => ({
                     queuedMessages: state.queuedMessages,
@@ -324,6 +485,11 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     followUpBehavior: state.followUpBehavior,
                 }),
                 migrate: migrateMessageQueueState,
+                onRehydrateStorage: () => (state) => {
+                    if (!state) return;
+                    const queuedMessages = normalizePersistedQueueMessages(state.queuedMessages);
+                    useMessageQueueStore.setState({ queuedMessages });
+                },
             }
         ),
         {

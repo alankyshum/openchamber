@@ -1,0 +1,458 @@
+{
+  "title": "Durable server-side queue admission on Queue press",
+  "generated_at": "2025-06-05",
+  "goal": "When the user presses Queue in OpenChamber, the message must be admitted to OpenCode's durable v2 server queue (POST /api/session/:sessionID/prompt with delivery:'queue') and acknowledged, so the client can be closed/slept immediately and the message still runs. The local Zustand/localStorage queue survives only as an explicitly-labelled fallback for servers that do not support v2 durable admission.",
+  "assumptions": [
+    "Live OpenCode is 1.18.21 and supports POST /api/session/:sessionID/prompt with body {prompt:{text,files,agents}, delivery:'queue'}, returning a SessionInputAdmitted acknowledgement, durable across client disconnect and server restart.",
+    "The legacy prompt_async path used today by OpencodeClient.sendMessage (packages/ui/src/lib/opencode/client.ts:896) does NOT accept delivery:'queue'. It must not be reused for admission.",
+    "The v2 durable queue exposes no list, edit, cancel, or reorder operation. Admission is one-way and irreversible from the client.",
+    "The v2 prompt input carries no per-input model / agent / variant fields. Those are session-level settings resolved by the server at drain time, so the per-item sendConfig captured today (messageQueueStore.ts:49) has no meaning for admitted items.",
+    "@opencode-ai/sdk is pinned at 1.18.18 in both package.json and packages/ui/package.json while the live server is 1.18.21, so the SDK may not type delivery:'queue'. A raw runtimeFetch POST is an accepted transport (client.ts already uses runtimeFetch for /api/session-activity, /api/agent, and /fs/*).",
+    "Server admission is the only path that lets the client sleep. Any item still held locally must be visibly labelled as requiring the client to stay open.",
+    "Queue capacity guards MAX_MESSAGES_PER_QUEUE=20 and MAX_QUEUE_TARGETS=50 apply only to locally-held items; the server owns its own queue depth.",
+    "Existing ambiguous-transport-failure tagging in client.ts (markAmbiguousTransportFailure / isAmbiguousTransportFailure) is the correct precedent for never auto-retrying a dispatched-but-unconfirmed write."
+  ],
+  "recon_references": [
+    "packages/ui/src/stores/messageQueueStore.ts — QueuedMessage shape (43-55), MessageQueueTarget key (57-82), addToQueue (148), removeFromQueue (178), reorderQueue (199), popToInput (222), clearQueue (254), markSending/clearSending (275-297), getSendableQueue (299), persist name 'message-queue-store' version 2 with migrateMessageQueueState (126)",
+    "packages/ui/src/hooks/useQueuedMessageAutoSend.ts — buildQueuedAutoSendPayload (79), sendQueuedAutoSendPayload (105), resolveSessionSendConfig (124), shouldDispatchQueuedAutoSend (165), resolveQueuedSessionStatusType (188), dispatchSessionQueue idle-gated drain loop (238-320), retry backoff 2s..60s (18-28)",
+    "packages/ui/src/components/chat/ChatInput.tsx — handleQueueMessage (890-925), handleQueuedMessageEdit (927), handleQueuedMessageSend forces delivery:'steer' (934), handleSubmit merge of whole queue and sendingIds exclusion (962-1102), SubmitOptions.delivery type (881)",
+    "packages/ui/src/components/chat/QueuedMessageChips.tsx — edit/send/remove chip actions (72-98), dnd reorder handleDragEnd (144), popToInput edit path (150-161)",
+    "packages/ui/src/lib/opencode/client.ts — sendMessage params incl. delivery?:'steer' (779-805), part assembly and normalization (812-873), promptAsync call (896-909), error/ambiguous-transport handling (910-954), runtimeFetch usage precedent (1120, 1560, 1743)",
+    "packages/ui/src/sync/session-ui-store.ts — routeMessage delivery passthrough (126-224), SendMessageOptions.delivery?: 'steer' (232-239), existing-session send path (1452-1540)",
+    "packages/ui/src/lib/i18n/messages/en.ts:2090-2096 — chat.queuedMessage.* keys",
+    "packages/vscode/src/bridge-proxy-runtime.ts:79-137 — proxy read allowlist is GET-only; POST writes pass through uncoalesced, so a new POST path needs no allowlist entry but does need a transport smoke check"
+  ],
+  "waves": [
+    {"label": "Wave 1 — contract lock (blocking, sequential)", "task_ids": ["T0"]},
+    {"label": "Wave 2 — transport + store (parallel)", "task_ids": ["T1", "T2"]},
+    {"label": "Wave 3 — drain safety + composer/chips UI (parallel after T1,T2)", "task_ids": ["T3", "T4", "T5"]},
+    {"label": "Wave 4 — tests and MVP verification gate (sequential)", "task_ids": ["T6", "T7"]},
+    {"label": "Wave 5 — post-MVP hardening (deferrable)", "task_ids": ["T8", "T9"]}
+  ],
+  "tasks": [
+    {
+      "id": "T0",
+      "agent": "explore",
+      "goal": "Lock the exact wire contract against the running OpenCode 1.18.21 before any code: confirm request body key names for prompt.text / prompt.files / prompt.agents, whether messageID (or an equivalent client-supplied id) is accepted for idempotency, the exact SessionInputAdmitted response field names, the HTTP status and error body returned by a server that lacks delivery:'queue', and whether the pinned SDK 1.18.18 v2 surface types a delivery field on the non-async prompt method. Produce a one-page contract note; do not modify source.",
+      "files": [
+        "node_modules/@opencode-ai/sdk/dist (types only, read)",
+        ".planning/durable-server-queue-admission/contract-note.md"
+      ],
+      "depends_on": [],
+      "done": [
+        "Request body key names and nesting confirmed against the live server or its OpenAPI document.",
+        "Idempotency mechanism identified: either a client-supplied message id is accepted, or it is explicitly recorded as unavailable.",
+        "SessionInputAdmitted acknowledgement fields enumerated, including whether it returns a server-side queue entry id.",
+        "Unsupported-server failure signature recorded as concrete status codes and body text.",
+        "SDK-vs-raw-fetch transport decision recorded with the reason."
+      ],
+      "prior": "Read client.ts:779-955 and the runtimeFetch precedent at client.ts:1743 before probing.",
+      "donot": "Do not edit any file under packages/. Do not bump the SDK pin as part of this task.",
+      "verify": "Contract note exists and answers all five DONE bullets with cited evidence.",
+      "reply": "The five contract answers plus the recommended transport (SDK method vs raw runtimeFetch)."
+    },
+    {
+      "id": "T1",
+      "agent": "code",
+      "goal": "Add a dedicated durable-admission transport, separate from the legacy prompt_async send path, plus per-runtime capability detection. New module packages/ui/src/lib/opencode/queueAdmission.ts exporting an admit function that takes {runtimeKey, sessionId, directory, text, files, agentMentionName, clientMessageId} and returns a discriminated result: admitted (with acknowledgement payload), unsupported (server lacks v2 durable queue), failed (deterministic error), or ambiguous (transport failure of unknown outcome). Reuse the existing file normalization on OpencodeClient rather than reimplementing MIME/HEIC handling. Cache the unsupported verdict per runtimeKey in memory only, invalidated on runtime switch.",
+      "files": [
+        "packages/ui/src/lib/opencode/queueAdmission.ts (new)",
+        "packages/ui/src/lib/opencode/client.ts"
+      ],
+      "depends_on": ["T0"],
+      "done": [
+        "Admission never routes through session.promptAsync.",
+        "Attachments are normalized through the same code path as OpencodeClient.sendMessage so MIME normalization and HEIC conversion behaviour is identical.",
+        "Agent mention is carried in the prompt agents field; no agent-mention text is silently dropped.",
+        "Result type is a discriminated union with exactly four outcomes and no thrown-error escape for the unsupported case.",
+        "Ambiguous transport failures are tagged using the existing markAmbiguousTransportFailure helper rather than a new mechanism.",
+        "Capability cache is per runtimeKey, in memory, never persisted."
+      ],
+      "prior": "Read the T0 contract note, client.ts:768-955, and packages/ui/src/lib/runtime-fetch.",
+      "donot": "Do not widen sendMessage's delivery union to include 'queue'; the legacy path does not support it. Do not persist the capability verdict to localStorage.",
+      "verify": "bun run type-check:ui && bun run lint:ui",
+      "reply": "Exported symbol names, the result union shape, and where the capability cache lives."
+    },
+    {
+      "id": "T2",
+      "agent": "code",
+      "goal": "Extend messageQueueStore to model server-admitted items distinctly from locally-held ones. Add a per-item origin/state field covering: local (client must stay open), pending-admission, admitted (server-owned), and admission-failed. Add store actions to mark admission pending, admitted, and failed, and to record the client message id used for idempotency. Admitted items must be excluded from getSendableQueue. Bump persist version to 3 with a migration that maps every existing persisted item to the local state and preserves the existing quarantine behaviour.",
+      "files": [
+        "packages/ui/src/stores/messageQueueStore.ts"
+      ],
+      "depends_on": ["T0"],
+      "done": [
+        "QueuedMessage carries an explicit admission state and the client message id used at admission time.",
+        "getSendableQueue returns neither admitted nor pending-admission items, so no existing consumer can re-send them.",
+        "clearQueue retains admitted and pending-admission items on the same principle that already retains sendingIds items (messageQueueStore.ts:254-269).",
+        "Persist version is 3 and migrateMessageQueueState maps v2 items to the local state without data loss.",
+        "Per-item sendConfig is retained only for local-state items and is documented as meaningless for admitted items.",
+        "MAX_MESSAGES_PER_QUEUE trimming cannot evict an admitted item."
+      ],
+      "prior": "Read messageQueueStore.ts in full and messageQueueStore.test.ts.",
+      "donot": "Do not delete the sendingIds mechanism; it still guards the local fallback drain. Do not persist an in-flight pending-admission state as if it were confirmed.",
+      "verify": "bun run type-check:ui && node scripts/run-isolated-tests.mjs src/stores/messageQueueStore.test.ts",
+      "reply": "New state field name, action signatures, and the migration mapping."
+    },
+    {
+      "id": "T3",
+      "agent": "code",
+      "goal": "Make the local auto-send drain admission-aware so an admitted message can never be delivered twice. useQueuedMessageAutoSend must skip admitted and pending-admission items entirely, must not count them when deciding whether a session has queued work, and must leave admission-failed items alone (they are user-actionable, not auto-retried). The idle-gated drain continues to operate unchanged for local-state items only.",
+      "files": [
+        "packages/ui/src/hooks/useQueuedMessageAutoSend.ts"
+      ],
+      "depends_on": ["T2"],
+      "done": [
+        "buildQueuedAutoSendPayload can never select an admitted, pending-admission, or admission-failed item.",
+        "A target whose queue contains only admitted items is treated as having no queued work and schedules no retry timer.",
+        "The existing backoff, abort-window hold, and auto-review gating behaviour is unchanged for local items.",
+        "No behavioural change when the server is unsupported and every item is local."
+      ],
+      "prior": "Read useQueuedMessageAutoSend.ts:79-122 and 238-354, and its test file.",
+      "donot": "Do not add a second retry loop for admitted items. The server owns them.",
+      "verify": "node scripts/run-isolated-tests.mjs src/hooks/useQueuedMessageAutoSend.test.ts",
+      "reply": "The exact gate points changed and why each is necessary for duplicate prevention."
+    },
+    {
+      "id": "T4",
+      "agent": "code",
+      "goal": "Rewire the Queue press in the composer. handleQueueMessage becomes an async admission: capture the composer snapshot and inline drafts exactly as today, generate the client message id, insert the item in pending-admission state so the chip appears instantly, clear the composer, then attempt admission. On admitted, mark admitted. On unsupported, downgrade the item to local state and leave the existing local drain to handle it. On deterministic failure or ambiguous transport failure, mark admission-failed. Additionally, because the v2 queue has no per-input model/agent/variant, persist the composer's current model/agent/variant to the session selection before admission so the server's session-level config matches the user's intent at Queue time. Finally, exclude admitted and pending-admission items from the whole-queue merge in handleSubmit.",
+      "files": [
+        "packages/ui/src/components/chat/ChatInput.tsx"
+      ],
+      "depends_on": ["T1", "T2"],
+      "done": [
+        "Composer text is never lost: on any failure the item remains visible with its full content and a restore-to-composer action.",
+        "Queue press clears the composer optimistically but the chip shows pending-admission until the acknowledgement lands.",
+        "Session model/agent/variant selection is written before the admission request, not after.",
+        "handleSubmit's queuedMessagesToSend filter excludes admitted and pending-admission items in addition to the existing sendingIds exclusion.",
+        "The autoReview and permission/question deferral paths that call handleQueueMessage still work and now produce a server-admitted item when supported.",
+        "No await gap allows a session switch to reroute the admission; the target is captured before the first await, matching the existing capturedTarget discipline."
+      ],
+      "prior": "Read ChatInput.tsx:685-1102 in full, especially the capturedTarget and sendingIds discipline.",
+      "donot": "Do not make Queue press block the UI on the network round trip. Do not reuse handleSubmit for admission.",
+      "verify": "bun run type-check:ui && bun run lint:ui",
+      "reply": "The state transitions implemented and where each failure branch leaves the user's text."
+    },
+    {
+      "id": "T5",
+      "agent": "designer",
+      "goal": "Rework the queue chips for the two-tier reality. Admitted items render read-only: no drag handle, no edit, no send, no remove; instead a 'Queued on server' state with an explanatory affordance that the client may be closed. Pending-admission items render with a busy indicator and no destructive actions. Admission-failed items render with Retry and Move to composer actions. Local-state items keep today's full edit/send/remove/reorder behaviour but gain a label making clear the client must stay open. Reordering is disabled whenever the list contains an admitted item, since server order is fixed. Add the new i18n keys to en.ts and mirror them across the other locale files.",
+      "files": [
+        "packages/ui/src/components/chat/QueuedMessageChips.tsx",
+        "packages/ui/src/lib/i18n/messages/en.ts",
+        "packages/ui/src/lib/i18n/messages/*.ts"
+      ],
+      "depends_on": ["T2"],
+      "done": [
+        "No control is rendered for an admitted item that the v2 API cannot honour (no edit, cancel, reorder, or remove).",
+        "The header communicates the durability guarantee: server-queued items are safe to close the client on.",
+        "Local fallback items are visually and textually distinguished from server-queued items.",
+        "Failed items expose exactly two actions: retry admission, and move the text back to the composer.",
+        "Every new string is a translated key, not a literal, and en.ts is complete.",
+        "Accessible labels exist for each new state and action."
+      ],
+      "prior": "Read QueuedMessageChips.tsx in full and en.ts:2090-2096.",
+      "donot": "Do not keep a disabled-but-visible edit button on admitted items; remove it. Do not invent a cancel action the API cannot back.",
+      "verify": "bun run type-check:ui && bun run lint:ui",
+      "reply": "The four chip states rendered and the new i18n key names."
+    },
+    {
+      "id": "T6",
+      "agent": "code",
+      "goal": "Write the test suite for admission. Cover: exact request payload shape sent on Queue press including attachments and agent mention; admitted acknowledgement transitions the item to admitted; unsupported response downgrades to the local queue and the legacy drain still delivers it; deterministic failure and ambiguous transport failure both land in admission-failed without auto-retry; the auto-send drain never selects an admitted or pending item; the composer merge never re-sends an admitted item; the v2-to-v3 persist migration maps legacy items to local state; and a same-message double Queue press cannot produce two admissions.",
+      "files": [
+        "packages/ui/src/lib/opencode/queueAdmission.test.ts (new)",
+        "packages/ui/src/stores/messageQueueStore.test.ts",
+        "packages/ui/src/hooks/useQueuedMessageAutoSend.test.ts",
+        "packages/ui/src/lib/opencode/client.test.ts"
+      ],
+      "depends_on": ["T1", "T2", "T3", "T4"],
+      "done": [
+        "An exact-payload assertion pins the request body key names, so an upstream rename fails the suite rather than silently degrading.",
+        "Each of the four admission outcomes has a dedicated test.",
+        "A duplicate-prevention test asserts a single admission for a repeated Queue press with the same client message id.",
+        "A regression test asserts admitted items are invisible to both getSendableQueue and the composer merge.",
+        "The migration test asserts no persisted item is lost or wrongly marked admitted.",
+        "Whole-package suite passes, not just the new files."
+      ],
+      "prior": "Read client.test.ts for the existing SDK-mock harness style and messageQueueStore.test.ts for store test conventions.",
+      "donot": "Do not mock at a level that would let a wrong endpoint path pass. Assert the path and method.",
+      "verify": "bun run --cwd packages/ui test",
+      "reply": "Test counts before and after, and the exact payload assertion used."
+    },
+    {
+      "id": "T7",
+      "agent": "code-reviewer",
+      "goal": "Read-only MVP gate review. Verify the durability claim end to end: that pressing Queue with a supported server results in a request the server acknowledges, that nothing in the client is required to stay alive afterwards, and that no code path can deliver an admitted message a second time. Re-run type-check, lint, and the full UI suite independently rather than trusting the implementation report.",
+      "files": [
+        "packages/ui/src/lib/opencode/queueAdmission.ts",
+        "packages/ui/src/stores/messageQueueStore.ts",
+        "packages/ui/src/hooks/useQueuedMessageAutoSend.ts",
+        "packages/ui/src/components/chat/ChatInput.tsx",
+        "packages/ui/src/components/chat/QueuedMessageChips.tsx"
+      ],
+      "depends_on": ["T6"],
+      "done": [
+        "Every duplicate-delivery path is enumerated and shown closed: auto-send drain, composer merge, chip force-send, and retry after ambiguous failure.",
+        "No user text can be lost on any failure branch.",
+        "No UI control promises an operation the v2 API cannot perform.",
+        "Independent re-run of all verification commands passes."
+      ],
+      "prior": "Read the full diff and the T0 contract note.",
+      "donot": "Do not modify source. Report findings only.",
+      "verify": "bun run type-check:ui && bun run lint:ui && bun run --cwd packages/ui test",
+      "reply": "Pass or fail with the enumerated duplicate paths and any blocking finding."
+    },
+    {
+      "id": "T8",
+      "agent": "code",
+      "goal": "Post-MVP: harden the fallback and remote transports. Confirm admission works through the VS Code bridge proxy (POST writes bypass the GET-only read allowlist at bridge-proxy-runtime.ts:79) and through the relay tunnel, where ambiguous transport failures are common. Add a capability re-probe on runtime switch and on reconnect so a server upgraded from unsupported to supported starts admitting without a client restart.",
+      "files": [
+        "packages/ui/src/lib/opencode/queueAdmission.ts",
+        "packages/vscode/src/bridge-proxy-runtime.test.ts"
+      ],
+      "depends_on": ["T7"],
+      "done": [
+        "Admission POST is verified to traverse the VS Code bridge proxy unmodified.",
+        "Capability verdict is re-probed on runtime switch and reconnect, never cached across runtimes.",
+        "Relay ambiguous-failure behaviour is asserted: no auto-retry, user-actionable state."
+      ],
+      "prior": "Read bridge-proxy-runtime.ts:79-190 and its tests.",
+      "donot": "Do not add retry logic for ambiguous failures.",
+      "verify": "bun run --cwd packages/vscode test && bun run --cwd packages/ui test",
+      "reply": "Transport verification results per runtime."
+    },
+    {
+      "id": "T9",
+      "agent": "code",
+      "goal": "Post-MVP: reconcile admitted items against reality. Once the server echoes the queued user message over SSE, clear the corresponding admitted chip so the queue list does not accumulate stale server-queued entries across sessions. Prune admitted items older than a bounded age on hydration so a permanently vanished server entry cannot pin a chip forever.",
+      "files": [
+        "packages/ui/src/stores/messageQueueStore.ts",
+        "packages/ui/src/hooks/useQueuedMessageAutoSend.ts"
+      ],
+      "depends_on": ["T7"],
+      "done": [
+        "An admitted chip clears when its message id appears in the session message stream.",
+        "Stale admitted items are pruned on hydration with a bounded age, and pruning never resurrects them as sendable.",
+        "Pruning cannot cause a re-send."
+      ],
+      "prior": "Read how SSE reconciles client-generated message ids in session-actions optimisticSend.",
+      "donot": "Do not treat absence from the stream as evidence to re-send.",
+      "verify": "bun run --cwd packages/ui test",
+      "reply": "Reconciliation trigger and pruning bound chosen."
+    }
+  ],
+  "success_criteria": [
+    "Pressing Queue against OpenCode 1.18.21 issues exactly one POST to /api/session/:sessionID/prompt with delivery:'queue' and the message body, and the chip shows an acknowledged server-queued state.",
+    "After acknowledgement, closing or sleeping the OpenChamber client does not prevent the message from running; no client-side drain is required.",
+    "No admitted message can be delivered twice via the auto-send drain, the composer whole-queue merge, the chip force-send, or a retry after an ambiguous transport failure.",
+    "Against a server without v2 durable queue support, Queue press silently falls back to the existing local queue, the chip is labelled as requiring the client to stay open, and current behaviour is otherwise unchanged.",
+    "No queue UI control offers edit, reorder, cancel, or remove on a server-admitted item.",
+    "Attachments and agent mentions queued via admission arrive with identical normalization to a direct send.",
+    "On any admission failure the user's text is preserved and recoverable to the composer in one action.",
+    "bun run type-check:ui, bun run lint:ui, and bun run --cwd packages/ui test all exit 0.",
+    "An exact-payload test pins the admission request body key names and endpoint path."
+  ],
+  "phases": [
+    {
+      "title": "Phase 0 — Contract lock",
+      "order": 1,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "Transport for admission given the SDK is pinned at 1.18.18 while the live server is 1.18.21",
+          "options": [
+            "Raw runtimeFetch POST to /api/session/:sessionID/prompt, matching the existing runtimeFetch precedent in client.ts",
+            "Bump @opencode-ai/sdk to 1.18.21 in both package.json files and call the typed v2 method",
+            "Call the SDK method with a locally-declared body type cast"
+          ],
+          "selected": "Raw runtimeFetch POST to /api/session/:sessionID/prompt, matching the existing runtimeFetch precedent in client.ts"
+        },
+        {
+          "question": "Idempotency mechanism for a repeated or retried Queue press",
+          "options": [
+            "Client-generated message id sent with the admission request and recorded on the item, mirroring the ascendingId('msg') discipline already used for prompt_async",
+            "Client-side dedupe only, keyed on content hash plus target",
+            "Rely on the server to dedupe"
+          ],
+          "selected": "Client-generated message id sent with the admission request and recorded on the item, mirroring the ascendingId('msg') discipline already used for prompt_async"
+        }
+      ],
+      "items": [
+        {"text": "T0 contract note answering all five wire-contract questions", "checked": false, "order": 1, "priority": "critical", "notes": "Blocking. Everything downstream assumes these key names."}
+      ],
+      "notes": "Sequential and blocking. A wrong body key name here silently degrades to a non-durable send, which is exactly the failure the user is trying to eliminate."
+    },
+    {
+      "title": "Phase 1 — Admission transport and capability detection (MVP)",
+      "order": 2,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "How to detect that a server lacks v2 durable queue support",
+          "options": [
+            "Lazy probe: attempt admission on first Queue press and classify the error response as unsupported, cached in memory per runtimeKey",
+            "Eager version check against the server version at connect time",
+            "Eager OpenAPI/capability endpoint check at connect time"
+          ],
+          "selected": "Lazy probe: attempt admission on first Queue press and classify the error response as unsupported, cached in memory per runtimeKey"
+        },
+        {
+          "question": "Where admission lives relative to the legacy send path",
+          "options": [
+            "New module queueAdmission.ts, legacy sendMessage untouched",
+            "New delivery:'queue' branch inside OpencodeClient.sendMessage",
+            "New method on OpencodeClient alongside sendMessage"
+          ],
+          "selected": "New module queueAdmission.ts, legacy sendMessage untouched"
+        }
+      ],
+      "items": [
+        {"text": "T1 queueAdmission module with four-outcome result union", "checked": false, "order": 1, "priority": "critical", "notes": "Must not route through promptAsync."},
+        {"text": "Reuse existing attachment normalization rather than reimplementing it", "checked": false, "order": 2, "priority": "high", "notes": "HEIC conversion and text/plain MIME normalization already live in client.ts."}
+      ],
+      "notes": "Parallel with Phase 2. This is the load-bearing phase for the durability guarantee."
+    },
+    {
+      "title": "Phase 2 — Queue store admission state (MVP)",
+      "order": 3,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "What happens to the per-item sendConfig now that v2 has no per-input model/agent/variant",
+          "options": [
+            "Write the composer's model/agent/variant to the session selection at Queue press, drop sendConfig from admitted items, retain it for local fallback items",
+            "Keep sendConfig on all items and ignore it for admitted ones",
+            "Remove sendConfig entirely from the store"
+          ],
+          "selected": "Write the composer's model/agent/variant to the session selection at Queue press, drop sendConfig from admitted items, retain it for local fallback items"
+        },
+        {
+          "question": "Persist behaviour for admitted items across a client restart",
+          "options": [
+            "Persist admitted items so the chip survives a restart and the user sees what is still server-queued",
+            "Do not persist admitted items; they are server-owned and the client should show nothing"
+          ],
+          "selected": "Persist admitted items so the chip survives a restart and the user sees what is still server-queued"
+        }
+      ],
+      "items": [
+        {"text": "T2 admission state field, actions, and getSendableQueue exclusion", "checked": false, "order": 1, "priority": "critical", "notes": "getSendableQueue is the single chokepoint every consumer already reads."},
+        {"text": "Persist version 3 migration mapping all v2 items to local state", "checked": false, "order": 2, "priority": "high", "notes": "Never mark a legacy item admitted; it was never sent to a server queue."}
+      ],
+      "notes": "Parallel with Phase 1."
+    },
+    {
+      "title": "Phase 3 — Duplicate prevention across every delivery path (MVP)",
+      "order": 4,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "Behaviour on an ambiguous transport failure, where the admission may or may not have reached the server",
+          "options": [
+            "No auto-retry; mark admission-failed with an explicit unknown-outcome state and a manual retry, mirroring the existing prompt_async ambiguous-failure policy",
+            "Auto-retry with backoff like the current local drain",
+            "Treat as admitted optimistically"
+          ],
+          "selected": "No auto-retry; mark admission-failed with an explicit unknown-outcome state and a manual retry, mirroring the existing prompt_async ambiguous-failure policy"
+        }
+      ],
+      "items": [
+        {"text": "T3 auto-send drain skips admitted, pending, and failed items", "checked": false, "order": 1, "priority": "critical", "notes": "The drain is the most likely source of a double delivery."},
+        {"text": "Composer handleSubmit merge excludes admitted and pending items", "checked": false, "order": 2, "priority": "critical", "notes": "The merge currently sweeps the whole queue into one send."}
+      ],
+      "notes": "Depends on Phase 2. Duplicate delivery is the highest-severity failure mode in this change."
+    },
+    {
+      "title": "Phase 4 — Composer and chip UI (MVP)",
+      "order": 5,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "What happens to edit, reorder, and remove controls once an item is admitted, given the v2 queue offers no list, edit, cancel, or reorder",
+          "options": [
+            "Remove the controls entirely for admitted items and render a read-only server-queued chip",
+            "Keep the controls disabled but visible with a tooltip explaining why",
+            "Keep edit as pop-to-composer, which would create a duplicate since the server copy cannot be cancelled"
+          ],
+          "selected": "Remove the controls entirely for admitted items and render a read-only server-queued chip"
+        },
+        {
+          "question": "Acknowledgement model for the Queue press",
+          "options": [
+            "Optimistic chip in a pending state that resolves to admitted or failed on the server response",
+            "Block the Queue button until the server acknowledges",
+            "Fire and forget with no acknowledgement state"
+          ],
+          "selected": "Optimistic chip in a pending state that resolves to admitted or failed on the server response"
+        }
+      ],
+      "items": [
+        {"text": "T4 async Queue press with pending/admitted/failed/local branches", "checked": false, "order": 1, "priority": "critical", "notes": "Text must never be lost on any branch."},
+        {"text": "T5 four chip states plus i18n keys across all locales", "checked": false, "order": 2, "priority": "high", "notes": "The safe-to-close guarantee must be legible in the UI."},
+        {"text": "Reorder disabled when any admitted item is present", "checked": false, "order": 3, "priority": "normal", "notes": "Server order is fixed and unqueryable."}
+      ],
+      "notes": "Depends on Phases 1 and 2. T4 and T5 can run in parallel."
+    },
+    {
+      "title": "Phase 5 — Tests and MVP gate",
+      "order": 6,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "Test depth for the wire contract",
+          "options": [
+            "Exact-payload assertion pinning endpoint path, method, and every body key",
+            "Shape-only assertion that a POST occurred"
+          ],
+          "selected": "Exact-payload assertion pinning endpoint path, method, and every body key"
+        }
+      ],
+      "items": [
+        {"text": "T6 admission, fallback, duplicate-prevention, and migration tests", "checked": false, "order": 1, "priority": "critical", "notes": "Exact-payload assertion is mandatory; a prior incident in this codebase shipped a claimed-but-absent payload change."},
+        {"text": "T7 independent read-only review re-running all verification commands", "checked": false, "order": 2, "priority": "high", "notes": "Do not trust the implementation report."}
+      ],
+      "notes": "This phase closes the MVP. Ship after T7 passes."
+    },
+    {
+      "title": "Phase 6 — Post-MVP hardening (deferrable)",
+      "order": 7,
+      "decision": "pending",
+      "decisions": [
+        {
+          "question": "Should stale admitted chips be reconciled against the session message stream",
+          "options": [
+            "Yes, clear an admitted chip when its message id appears in the stream, plus bounded-age pruning on hydration",
+            "No, leave admitted chips until the user clears them"
+          ],
+          "selected": "Yes, clear an admitted chip when its message id appears in the stream, plus bounded-age pruning on hydration"
+        }
+      ],
+      "items": [
+        {"text": "T8 VS Code bridge and relay transport verification, capability re-probe", "checked": false, "order": 1, "priority": "normal", "notes": "POST writes are not in the GET-only read allowlist, so they should pass through; verify rather than assume."},
+        {"text": "T9 SSE reconciliation and bounded-age pruning of admitted chips", "checked": false, "order": 2, "priority": "normal", "notes": "Pruning must never make an item sendable again."}
+      ],
+      "notes": "Explicitly out of the MVP cut. Ship Phases 0-5 first."
+    }
+  ],
+  "out_of_scope": [
+    "Phase G non-goal: building any client-side emulation of edit, reorder, cancel, or list for server-admitted items. The v2 API cannot back these operations and faking them creates duplicate or phantom messages.",
+    "Phase G non-goal: per-queued-item model, agent, or variant selection. These are session-level in v2; the plan writes the session selection at Queue press instead.",
+    "Phase G non-goal: removing the local Zustand queue. It remains the labelled fallback for servers without v2 durable admission.",
+    "Phase G non-goal: changing the steer delivery path or the follow-up behaviour setting semantics ('steer' vs 'queue' in messageQueueStore.ts:9-41).",
+    "Phase G non-goal: adding a server-side queue depth, priority, or scheduling feature.",
+    "Phase G non-goal: bumping @opencode-ai/sdk as part of this change; the raw-fetch transport avoids coupling the feature to a dependency upgrade.",
+    "Phase G non-goal: changing the new-session draft send path; admission applies to existing sessions only, since a draft has no session id to admit against."
+  ],
+  "risk_flags": [
+    "Wire-contract drift: the SDK pin (1.18.18) trails the live server (1.18.21), so body key names are assumed until T0 confirms them. Mitigation: T0 is blocking and Phase 5 pins the payload with an exact assertion.",
+    "Duplicate delivery is the highest-severity failure: four separate code paths can deliver a queued item (auto-send drain, composer whole-queue merge, chip force-send, retry after failure). Mitigation: single chokepoint at getSendableQueue plus an enumerated review in T7.",
+    "Irreversibility: admission cannot be undone, so an accidental Queue press is unrecoverable. Mitigation: the pending state is optimistic but short-lived, and the UI must be explicit that server-queued items cannot be edited or cancelled.",
+    "Ambiguous transport failure over the relay may leave a message admitted while the client believes it failed; a naive retry would double-deliver. Mitigation: no auto-retry, explicit unknown-outcome state, manual user action only.",
+    "Attachment payload size: data-URL attachments in the admission body may exceed proxy or relay limits that the streaming send path tolerates differently. Mitigation: reuse the existing normalization and verify large-attachment admission in T8.",
+    "Session-level model/agent semantics change silently: a user who queues with model A and then switches the session to model B will have the queued message run under B. Mitigation: write the selection at Queue press and surface the session-level nature in the chip copy.",
+    "Persist migration risk: mismarking a legacy v2 item as admitted would strand it forever with no drain and no server copy. Mitigation: migration maps every legacy item to local state, asserted by test.",
+    "Scope creep into a full queue-management UI. Mitigation: Phase G non-goals are explicit and the MVP cut line is Phases 0-5."
+  ]
+}

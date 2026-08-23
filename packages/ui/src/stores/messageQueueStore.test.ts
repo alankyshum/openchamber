@@ -3,6 +3,7 @@ import {
   createMessageQueueTarget,
   getMessageQueueKey,
   migrateMessageQueueState,
+  normalizePersistedQueueMessages,
   parseMessageQueueKey,
   useMessageQueueStore,
 } from "./messageQueueStore"
@@ -92,5 +93,89 @@ describe("in-flight queued sends", () => {
     useMessageQueueStore.getState().clearQueue(target)
 
     expect(useMessageQueueStore.getState().getQueueForTarget(target)).toHaveLength(0)
+  })
+
+  test("admitted and pending messages are never locally sendable or cleared", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    const pending = store.addToQueue(target, { content: "pending", admissionState: 'pending-admission' })
+    const admitted = store.addToQueue(target, { content: "admitted", admissionState: 'admitted' })
+    expect(store.getSendableQueue(target)).toHaveLength(0)
+    store.clearQueue(target)
+    const remaining = store.getQueueForTarget(target)
+    expect(remaining.map((message) => message.id)).toEqual([pending, admitted])
+  })
+
+  test("v2 migration marks legacy queued items local", () => {
+    const migrated = migrateMessageQueueState({ queuedMessages: { key: [{ id: 'q', content: 'text', createdAt: 1 }] } }, 2)
+    expect(migrated.queuedMessages?.key?.[0]?.admissionState).toBe('local')
+  })
+
+  test("migration does not turn an interrupted admission into a resend", () => {
+    const migrated = migrateMessageQueueState({ queuedMessages: { key: [{ id: 'q', content: 'text', createdAt: 1, admissionState: 'pending-admission' }] } }, 3)
+    expect(migrated.queuedMessages?.key?.[0]?.admissionState).toBe('admission-unknown')
+  })
+
+  test("same-version hydration normalizes pending items and expires old admitted history", () => {
+    const hydrated = normalizePersistedQueueMessages({ key: [
+      { id: 'pending', content: 'keep', createdAt: Date.now(), admissionState: 'pending-admission' },
+      { id: 'old', content: 'drop', createdAt: 1, admissionState: 'admitted' },
+    ]})
+    expect(hydrated.key?.map((message) => [message.id, message.admissionState])).toEqual([['pending', 'admission-unknown']])
+  })
+
+  test("bounds admitted history without evicting recoverable messages", () => {
+    const recoverable = Array.from({ length: 20 }, (_, index) => ({
+      id: `local-${index}`, content: `local-${index}`, createdAt: Date.now(), admissionState: 'admission-failed' as const,
+    }))
+    const admitted = Array.from({ length: 30 }, (_, index) => ({
+      id: `admitted-${index}`, content: `admitted-${index}`, createdAt: Date.now(), admissionState: 'admitted' as const,
+    }))
+    const normalized = normalizePersistedQueueMessages({ key: [...recoverable, ...admitted] }).key ?? []
+    expect(normalized.filter((message) => message.admissionState === 'admission-failed')).toHaveLength(20)
+    expect(normalized.filter((message) => message.admissionState === 'admitted')).toHaveLength(20)
+  })
+
+  test("settling B never changes pending A data", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const attachment = { id: 'a-file', file: new File([], 'a.txt'), dataUrl: 'data:text/plain;base64,a', mimeType: 'text/plain', filename: 'a.txt', size: 1, source: 'local' as const }
+    const store = useMessageQueueStore.getState()
+    const a = store.addToQueue(target, { content: 'A', admissionState: 'pending-admission', clientMessageId: 'msg_a', attachments: [attachment], sendConfig: { providerID: 'p', modelID: 'm' } })
+    const b = store.addToQueue(target, { content: 'B', admissionState: 'pending-admission', clientMessageId: 'msg_b', attachments: [attachment], sendConfig: { providerID: 'p', modelID: 'm' } })
+
+    useMessageQueueStore.getState().markAdmissionLocal(target, b)
+    let queue = useMessageQueueStore.getState().getQueueForTarget(target)
+    const pendingA = queue.find((message) => message.id === a)
+    expect(pendingA?.admissionState).toBe('pending-admission')
+    expect(pendingA?.attachments).toEqual([attachment])
+    expect(pendingA?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
+
+    useMessageQueueStore.getState().markAdmissionLocal(target, a)
+    expect(useMessageQueueStore.getState().getSendableQueue(target).map((message) => message.id)).toEqual([a, b])
+    useMessageQueueStore.getState().markAdmissionPending(target, a, 'msg_a')
+
+    useMessageQueueStore.getState().markAdmissionPending(target, b, 'msg_b')
+    useMessageQueueStore.getState().markAdmissionFailed(target, b)
+    queue = useMessageQueueStore.getState().getQueueForTarget(target)
+    const pendingAAfterFailedB = queue.find((message) => message.id === a)
+    expect(pendingAAfterFailedB?.admissionState).toBe('pending-admission')
+    expect(pendingAAfterFailedB?.attachments).toEqual([attachment])
+    expect(pendingAAfterFailedB?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
+    expect(queue.find((message) => message.id === b)?.admissionState).toBe('admission-failed')
+
+    useMessageQueueStore.getState().markAdmissionPending(target, b, 'msg_b')
+    useMessageQueueStore.getState().markAdmissionUnknown(target, b)
+    queue = useMessageQueueStore.getState().getQueueForTarget(target)
+    const pendingAAfterUnknownB = queue.find((message) => message.id === a)
+    expect(pendingAAfterUnknownB?.admissionState).toBe('pending-admission')
+    expect(pendingAAfterUnknownB?.attachments).toEqual([attachment])
+    expect(pendingAAfterUnknownB?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
+
+    useMessageQueueStore.getState().markAdmissionLocal(target, a)
+    queue = useMessageQueueStore.getState().getQueueForTarget(target)
+    expect(queue.map((message) => message.id)).toEqual([a, b])
+    expect(queue.map((message) => message.admissionState)).toEqual(['local', 'admission-unknown'])
+    expect(queue.find((message) => message.id === a)?.attachments).toEqual([attachment])
+    expect(queue.find((message) => message.id === a)?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
   })
 })

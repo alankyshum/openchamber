@@ -1,0 +1,172 @@
+import { runtimeFetch } from '@/lib/runtime-fetch';
+import { getRuntimeKey } from '@/lib/runtime-switch';
+import { isAmbiguousTransportFailure, markAmbiguousTransportFailure } from '@/lib/relay/transport-error';
+import type { AttachedFile } from '@/stores/types/sessionTypes';
+
+export type QueueAdmissionInput = {
+  runtimeKey: string; sessionId: string; directory: string; text: string;
+  files?: AttachedFile[]; agentMentionName?: string; clientMessageId: string;
+};
+export type QueueAdmissionResult =
+  | { outcome: 'admitted'; acknowledgement: SessionInputAdmitted }
+  | { outcome: 'unsupported'; error: Error }
+  | { outcome: 'failed'; error: Error }
+  | { outcome: 'ambiguous'; error: Error };
+
+const unsupportedRuntimes = new Map<string, number>();
+const UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1000;
+export const ADMISSION_TIMEOUT_MS = 15_000;
+const inFlightAdmissions = new Map<string, Promise<QueueAdmissionResult>>();
+
+const readResponseBody = async <T>(
+  read: () => Promise<T>,
+  signal: AbortSignal | null,
+): Promise<T> => {
+  if (!signal) return read();
+  if (signal.aborted) throw new DOMException('The operation timed out', 'AbortError');
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('The operation timed out', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    read().then((value) => {
+      cleanup();
+      resolve(value);
+    }, (error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+};
+
+export type SessionInputAdmitted = {
+  admittedSeq: number; id: string; sessionID: string;
+  prompt: unknown; delivery: 'queue'; timeCreated: number; promotedSeq?: number;
+};
+
+export const parseAdmissionAck = (value: unknown, expected: QueueAdmissionInput): SessionInputAdmitted | null => {
+  const data = (value as { data?: unknown } | null)?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const ack = data as Record<string, unknown>;
+  if (ack.delivery !== 'queue' || typeof ack.admittedSeq !== 'number' || !Number.isInteger(ack.admittedSeq) || ack.admittedSeq < 0
+    || ack.id !== expected.clientMessageId || ack.sessionID !== expected.sessionId
+    || typeof ack.timeCreated !== 'number' || !Number.isFinite(ack.timeCreated)
+    || !('prompt' in ack) || typeof ack.prompt !== 'object' || ack.prompt === null || Array.isArray(ack.prompt)) return null;
+  return ack as unknown as SessionInputAdmitted;
+};
+
+// Capability is intentionally process-local. A runtime switch must never
+// inherit the verdict (or an old server's capabilities).
+if (typeof window !== 'undefined') {
+  window.addEventListener('openchamber:runtime-endpoint-changed', () => unsupportedRuntimes.clear());
+}
+
+export const buildQueueAdmissionPayload = (input: QueueAdmissionInput) => {
+  // PromptInputFileAttachment's v2 schema is {uri, name?}; mime is inferred
+  // by the server from the data URI. Do not send the older SDK attachment key.
+  const files = (input.files ?? []).map((file) => ({ uri: file.dataUrl, name: file.filename }));
+  return {
+    id: input.clientMessageId,
+    prompt: { text: input.text, ...(files.length ? { files } : {}), ...(input.agentMentionName ? { agents: [{ name: input.agentMentionName }] } : {}) },
+    delivery: 'queue' as const,
+  };
+};
+
+/** Build the request using the v2 contract. Kept pure for exact-payload tests. */
+
+/** The v2 route is deliberately separate from the legacy prompt_async SDK call. */
+export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<QueueAdmissionResult> {
+  if (input.runtimeKey !== getRuntimeKey()) {
+    return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
+  }
+  const unsupportedAt = unsupportedRuntimes.get(input.runtimeKey);
+  if (unsupportedAt !== undefined) {
+    if (Date.now() - unsupportedAt < UNSUPPORTED_CACHE_TTL_MS) {
+      return { outcome: 'unsupported', error: new Error('Durable queue is not supported by this runtime') };
+    }
+    unsupportedRuntimes.delete(input.runtimeKey);
+  }
+  const key = `${input.runtimeKey}\n${input.sessionId}\n${input.clientMessageId}`;
+  const existing = inFlightAdmissions.get(key);
+  if (existing) return existing;
+  const request = admitToDurableQueueOnce(input);
+  inFlightAdmissions.set(key, request);
+  request.finally(() => inFlightAdmissions.delete(key)).catch(() => undefined);
+  return request;
+}
+
+async function admitToDurableQueueOnce(input: QueueAdmissionInput): Promise<QueueAdmissionResult> {
+  // v2 has session-level model/agent/variant selection only. The caller keeps
+  // its captured selection for local fallback, but admission intentionally
+  // does not mutate session selection non-atomically.
+  let body: ReturnType<typeof buildQueueAdmissionPayload>;
+  try {
+    const { opencodeClient } = await import('@/lib/opencode/client');
+    const normalizedFiles = await Promise.all((input.files ?? []).map(async (file) => {
+      const normalized = await opencodeClient.normalizeAttachmentForAdmission({ mime: file.mimeType, filename: file.filename, url: file.dataUrl });
+      return { uri: normalized.url, name: normalized.filename };
+    }));
+    body = buildQueueAdmissionPayload({
+      ...input,
+      files: (input.files ?? []).map((file, index) => ({
+        ...file,
+        dataUrl: normalizedFiles[index]?.uri ?? file.dataUrl,
+        filename: normalizedFiles[index]?.name ?? file.filename,
+      })),
+    });
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    return { outcome: 'failed', error };
+  }
+  if (input.runtimeKey !== getRuntimeKey()) {
+    return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
+  }
+  let response: Response;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), ADMISSION_TIMEOUT_MS) : null;
+  try {
+    response = await runtimeFetch(`/api/session/${encodeURIComponent(input.sessionId)}/prompt`, {
+      method: 'POST', query: input.directory ? { directory: input.directory } : undefined,
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (response.ok) {
+      const acknowledgement = parseAdmissionAck(await readResponseBody(() => response.json(), controller?.signal ?? null).catch(() => null), input);
+      if (!acknowledgement) {
+        return {
+          outcome: 'ambiguous',
+          error: markAmbiguousTransportFailure(new Error('Durable queue returned an invalid acknowledgement')),
+        };
+      }
+      return { outcome: 'admitted', acknowledgement };
+    }
+
+    const detail = await readResponseBody(() => response.text(), controller?.signal ?? null).catch(() => '');
+    const error = new Error(`Durable queue admission failed (${response.status})${detail ? `: ${detail}` : ''}`);
+    if (response.status === 405) {
+      unsupportedRuntimes.set(input.runtimeKey, Date.now());
+      return { outcome: 'unsupported', error };
+    }
+    if (response.status === 408 || response.status === 429 || response.status >= 500) {
+      return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
+    }
+    if ([400, 401, 403, 404, 422].includes(response.status)) {
+      return { outcome: 'failed', error };
+    }
+    return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
+  } catch (cause) {
+    // Fetch and response-body failures may occur after the request was sent.
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    return { outcome: 'ambiguous', error: isAmbiguousTransportFailure(error) ? error : markAmbiguousTransportFailure(error) };
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
+export const clearQueueAdmissionCapabilityCache = (): void => {
+  unsupportedRuntimes.clear();
+  inFlightAdmissions.clear();
+};

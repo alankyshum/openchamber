@@ -1,0 +1,122 @@
+import { describe, expect, test, mock, beforeEach } from 'bun:test';
+
+const defaultResponse = () => Response.json({ data: { admittedSeq: 1, id: 'msg_test', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } });
+let nextResponse: (() => Response | Promise<Response>) = defaultResponse;
+const runtimeFetchCalls: unknown[][] = [];
+const runtimeFetchMock = mock(async (...args: unknown[]) => {
+  runtimeFetchCalls.push(args);
+  return nextResponse();
+});
+mock.module('@/lib/runtime-fetch', () => ({ runtimeFetch: runtimeFetchMock }));
+mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => 'runtime-test' }));
+mock.module('@/lib/opencode/client', () => ({ opencodeClient: { normalizeAttachmentForAdmission: async (file: { mime: string; filename?: string; url: string }) => {
+  if (file.mime === 'image/heic') return { mime: 'image/jpeg', filename: file.filename?.replace(/\.heic$/i, '.jpg'), url: 'data:image/jpeg;base64,converted' };
+  if (file.mime.startsWith('text/')) return { mime: 'text/plain', filename: file.filename, url: file.url.replace(/^data:[^;,]+/, 'data:text/plain') };
+  return file;
+} } }));
+
+import { buildQueueAdmissionPayload, admitToDurableQueue, clearQueueAdmissionCapabilityCache } from './queueAdmission';
+
+const input = { runtimeKey: 'runtime-test', sessionId: 'ses_test', directory: '/repo', text: 'hello', agentMentionName: 'worker', clientMessageId: 'msg_test' };
+
+describe('durable queue admission', () => {
+  beforeEach(() => { nextResponse = defaultResponse; runtimeFetchCalls.length = 0; clearQueueAdmissionCapabilityCache(); });
+
+  test('pins the v2 endpoint and exact payload shape', async () => {
+    const result = await admitToDurableQueue(input);
+    expect(result.outcome).toBe('admitted');
+    if (result.outcome === 'admitted') {
+      expect(result.acknowledgement.admittedSeq).toBe(1);
+      expect(result.acknowledgement.id).toBe('msg_test');
+      expect(result.acknowledgement.sessionID).toBe('ses_test');
+    }
+    const call = runtimeFetchCalls[0];
+    expect(call?.[0]).toBe('/api/session/ses_test/prompt');
+    const request = call?.[1] as RequestInit & { query?: unknown };
+    expect(request.method).toBe('POST');
+    expect(request.query).toEqual({ directory: '/repo' });
+    expect(request.body).toBe(JSON.stringify({ id: 'msg_test', prompt: { text: 'hello', agents: [{ name: 'worker' }] }, delivery: 'queue' }));
+    expect(buildQueueAdmissionPayload(input)).toEqual({ id: 'msg_test', prompt: { text: 'hello', agents: [{ name: 'worker' }] }, delivery: 'queue' });
+  });
+
+  test('does not retry or throw on an ambiguous transport error', async () => {
+    nextResponse = () => Promise.reject(new Error('connection lost'));
+    const result = await admitToDurableQueue(input);
+    expect(result.outcome).toBe('ambiguous');
+    expect(runtimeFetchCalls.length).toBe(1);
+  });
+
+  test('rejects an unvalidated success envelope', async () => {
+    nextResponse = () => Response.json({ data: { admittedSeq: 1, id: 'wrong', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } });
+    expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
+  });
+
+  test('does not classify an HTTP 400 as unsupported without a capability error', async () => {
+    nextResponse = () => new Response('invalid prompt', { status: 400 });
+    expect((await admitToDurableQueue(input)).outcome).toBe('failed');
+    nextResponse = defaultResponse;
+    expect((await admitToDurableQueue(input)).outcome).toBe('admitted');
+  });
+
+  test('classifies only an explicit method rejection as unsupported', async () => {
+    nextResponse = () => new Response('method not allowed', { status: 405 });
+    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
+    nextResponse = () => Response.json({ data: { admittedSeq: 3, id: 'msg_test', sessionID: 'ses_test', delivery: 'queue', timeCreated: 3, prompt: { text: 'hello' } } });
+    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
+  });
+
+  test('treats potentially committed HTTP failures as ambiguous', async () => {
+    for (const status of [408, 429, 500, 502, 503, 504]) {
+      clearQueueAdmissionCapabilityCache();
+      runtimeFetchCalls.length = 0;
+      nextResponse = () => new Response('upstream failure', { status });
+      expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
+      expect(runtimeFetchCalls.length).toBe(1);
+    }
+  });
+
+  test('preserves attachments in the v2 prompt shape', () => {
+    expect(buildQueueAdmissionPayload({ ...input, files: [{ id: 'f', file: new File([], 'x.png'), dataUrl: 'data:image/png;base64,x', mimeType: 'image/png', filename: 'x.png', size: 1, source: 'local' }] }).prompt.files).toEqual([{ uri: 'data:image/png;base64,x', name: 'x.png' }]);
+  });
+
+  test('admits normalized HEIC and text files using uri/name only', async () => {
+    nextResponse = () => Response.json({ data: { admittedSeq: 2, id: 'msg_test', sessionID: 'ses_test', delivery: 'queue', timeCreated: 2, prompt: { text: 'hello' } } });
+    const result = await admitToDurableQueue({ ...input, files: [
+      { id: 'h', file: new File([], 'photo.heic'), dataUrl: 'data:image/heic;base64,x', mimeType: 'image/heic', filename: 'photo.heic', size: 1, source: 'local' },
+      { id: 't', file: new File([], 'note.md'), dataUrl: 'data:text/markdown;base64,x', mimeType: 'text/markdown', filename: 'note.md', size: 1, source: 'local' },
+    ] });
+    expect(result.outcome).toBe('admitted');
+    const body = JSON.parse((runtimeFetchCalls[0]?.[1] as { body: string }).body);
+    expect(body.prompt.files).toEqual([
+      { uri: 'data:image/jpeg;base64,converted', name: 'photo.jpg' },
+      { uri: 'data:text/plain;base64,x', name: 'note.md' },
+    ]);
+    expect(body.prompt.files.every((file: Record<string, unknown>) => !('mime' in file))).toBe(true);
+  });
+
+  test('deduplicates concurrent admission calls by client message id', async () => {
+    let resolve!: (response: Response) => void;
+    nextResponse = () => new Promise<Response>((r) => { resolve = r; });
+    const first = admitToDurableQueue(input);
+    const second = admitToDurableQueue(input);
+    // The admission implementation performs async attachment normalization
+    // before it invokes runtimeFetch.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    resolve(Response.json({ data: { admittedSeq: 1, id: 'msg_test', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } }));
+    await Promise.all([first, second]);
+    expect(runtimeFetchCalls.length).toBe(1);
+  });
+
+  test('passes an abort signal for the bounded admission request', async () => {
+    let signal: AbortSignal | undefined;
+    nextResponse = () => {
+      const init = (runtimeFetchCalls[runtimeFetchCalls.length - 1]?.[1] ?? {}) as RequestInit;
+      signal = init.signal ?? undefined;
+      return defaultResponse();
+    };
+    const result = await admitToDurableQueue(input);
+    expect(signal).toBeDefined();
+    expect(result.outcome).toBe('admitted');
+    expect(runtimeFetchCalls.length).toBe(1);
+  });
+});
