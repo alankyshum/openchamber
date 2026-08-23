@@ -55,6 +55,12 @@ export interface QueuedMessage {
         timeCreated: number;
         promotedSeq?: number;
     };
+    /** Latest durable ordering proof used to reject stale replay/live races. */
+    durableSeq?: number;
+    promptedSeq?: number;
+    /** Names/count from server-owned attachments; never treated as resendable. */
+    remoteAttachmentNames?: string[];
+    remoteAttachmentCount?: number;
     /** Send config captured at queue time — used as-is when auto-sending */
     sendConfig?: {
         providerID: string;
@@ -63,6 +69,15 @@ export interface QueuedMessage {
         variant?: string;
     };
 }
+
+export type DurableQueueAdmission = {
+    id: string;
+    sessionID: string;
+    admittedSeq?: number;
+    timeCreated?: number;
+    prompt?: { text?: string; files?: Array<{ uri: string; name?: string }> };
+    durableSeq?: number;
+};
 
 export type MessageQueueTarget = {
     runtimeKey: string;
@@ -90,7 +105,9 @@ const capQueueMessages = (messages: QueuedMessage[]): QueuedMessage[] => {
         .slice(-MAX_MESSAGES_PER_QUEUE);
     const retained = new Map<number, QueuedMessage>();
     for (const { message, index } of admittedCandidates.slice(-MAX_ADMITTED_HISTORY)) {
-        retained.set(index, { ...message, attachments: undefined, sendConfig: undefined });
+        retained.set(index, message.durableSeq === undefined
+            ? { ...message, attachments: undefined, sendConfig: undefined }
+            : message);
     }
     for (const { message, index } of pendingCandidates.slice(-MAX_PENDING_ADMISSIONS)) retained.set(index, message);
     for (const { message, index } of recoverableCandidates) retained.set(index, message);
@@ -157,6 +174,7 @@ interface MessageQueueState {
      * strand a queued message permanently.
      */
     sendingIds: Record<string, string[]>;
+    durableTombstones: Record<string, Record<string, number>>;
 }
 
 interface MessageQueueActions {
@@ -179,6 +197,8 @@ interface MessageQueueActions {
     hardDeleteQueue: (target: MessageQueueTarget) => void;
     recoverAdmissionToInput: (target: MessageQueueTarget, messageId: string) => QueuedMessage | null;
     dismissAdmissionUnknown: (target: MessageQueueTarget, messageId: string) => void;
+    upsertDurableAdmission: (target: MessageQueueTarget, admission: DurableQueueAdmission) => void;
+    removeDurableAdmission: (target: MessageQueueTarget, clientMessageId: string, promptedSeq?: number) => void;
 }
 
 type MessageQueueStore = MessageQueueState & MessageQueueActions;
@@ -188,6 +208,7 @@ type PersistedMessageQueueState = {
     quarantinedLegacyMessages?: Record<string, QueuedMessage[]>;
     followUpBehavior?: FollowUpBehavior;
     queueModeEnabled?: boolean;
+    durableTombstones?: Record<string, Record<string, number>>;
 };
 
 export const migrateMessageQueueState = (persistedState: unknown, version: number): Partial<MessageQueueStore> => {
@@ -202,6 +223,7 @@ export const migrateMessageQueueState = (persistedState: unknown, version: numbe
             ...(state.quarantinedLegacyMessages ?? {}),
             ...legacyQueues,
         },
+        durableTombstones: state.durableTombstones ?? {},
         followUpBehavior: normalizeFollowUpBehavior(state.followUpBehavior, state.queueModeEnabled ?? null),
     };
 };
@@ -214,6 +236,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 quarantinedLegacyMessages: {},
                 followUpBehavior: DEFAULT_FOLLOW_UP_BEHAVIOR,
                 sendingIds: {},
+                durableTombstones: {},
 
                 addToQueue: (target, message) => {
                     const key = getMessageQueueKey(target);
@@ -360,7 +383,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
 
                 clearAllQueues: () => {
-                    set({ queuedMessages: {}, sendingIds: {} });
+                    set({ queuedMessages: {}, sendingIds: {}, durableTombstones: {} });
                 },
 
                 markSending: (target, messageId) => {
@@ -406,14 +429,14 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
                 markAdmissionPending: (target, messageId, clientMessageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: (state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'pending-admission' as const, clientMessageId } : message) } }));
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'pending-admission' as const, clientMessageId } : message)) } }));
                 },
                 markAdmissionLocal: (target, messageId) => {
                     const key = getMessageQueueKey(target);
                     set((state) => ({
                             queuedMessages: {
                                 ...state.queuedMessages,
-                                [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId
+                                [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted'
                                     ? { ...message, admissionState: 'local' as const }
                                     : message)),
                             },
@@ -423,7 +446,9 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     const key = getMessageQueueKey(target);
                     set((state) => {
                         const updated = (state.queuedMessages[key] ?? []).map((message) => message.id === messageId
-                            ? { ...message, admissionState: 'admitted' as const, admissionAck, attachments: undefined, sendConfig: undefined }
+                            && message.durableSeq === undefined
+                            && (message.admissionAck?.admittedSeq ?? -1) <= (admissionAck?.admittedSeq ?? -1)
+                            ? { ...message, admissionState: 'admitted' as const, admissionAck, durableSeq: admissionAck?.admittedSeq, attachments: undefined, sendConfig: undefined }
                             : message);
                         const recoverable = updated.filter((message) => message.admissionState !== 'admitted');
                         const pending = recoverable.filter((message) => message.admissionState === 'pending-admission');
@@ -432,18 +457,22 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         return {
                             queuedMessages: {
                                 ...state.queuedMessages,
-                                [key]: [...actionable.slice(-MAX_MESSAGES_PER_QUEUE), ...pending.slice(-MAX_PENDING_ADMISSIONS), ...admitted.slice(-MAX_ADMITTED_HISTORY)],
+                                [key]: capQueueMessages([
+                                    ...actionable.slice(-MAX_MESSAGES_PER_QUEUE),
+                                    ...pending.slice(-MAX_PENDING_ADMISSIONS),
+                                    ...admitted.slice(-MAX_ADMITTED_HISTORY),
+                                ]),
                             },
                         };
                     });
                 },
                 markAdmissionFailed: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-failed' as const } : message)) } }));
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-failed' as const } : message)) } }));
                 },
                 markAdmissionUnknown: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-unknown' as const, sendConfig: undefined } : message)) } }));
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-unknown' as const, sendConfig: undefined } : message)) } }));
                 },
                 recoverAdmissionToInput: (target, messageId) => {
                     const key = getMessageQueueKey(target);
@@ -462,6 +491,74 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         },
                     }));
                 },
+                upsertDurableAdmission: (target, admission) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => {
+                        const current = state.queuedMessages[key] ?? [];
+                        const tombstone = state.durableTombstones[key]?.[admission.id];
+                        if (tombstone !== undefined && (admission.durableSeq ?? 0) <= tombstone) return state;
+                        const existing = current.find((message) => message.clientMessageId === admission.id);
+                        if (existing?.durableSeq !== undefined && (admission.durableSeq ?? 0) < existing.durableSeq) return state;
+                        const content = admission.prompt?.text ?? existing?.content ?? '';
+                        const next: QueuedMessage = {
+                            ...(existing ?? { id: `queued-server-${admission.id}`, createdAt: admission.timeCreated ?? Date.now(), content }),
+                            content,
+                            clientMessageId: admission.id,
+                            admissionState: 'admitted',
+                            admissionAck: {
+                                admittedSeq: admission.admittedSeq ?? 0,
+                                timeCreated: admission.timeCreated ?? Date.now(),
+                            },
+                            // Keep any local copy that raced the authoritative
+                            // event. The admitted state is never sendable, and
+                            // history capping removes payloads later, but this
+                            // preserves recovery data until then.
+                            attachments: existing?.attachments,
+                            sendConfig: existing?.sendConfig,
+                            durableSeq: admission.durableSeq,
+                            remoteAttachmentNames: admission.prompt?.files?.map((file) => file.name).filter((name): name is string => Boolean(name)),
+                            remoteAttachmentCount: admission.prompt?.files?.length,
+                        };
+                        const existingIndex = current.findIndex((message) => message.clientMessageId === admission.id);
+                        const updated = existingIndex < 0
+                            ? [...current, next]
+                            : current.map((message, index) => index === existingIndex ? next : message);
+                        return { queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages(updated) } };
+                    });
+                },
+                removeDurableAdmission: (target, clientMessageId, promptedSeq) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => {
+                        const next = (state.queuedMessages[key] ?? []).flatMap((message) => {
+                            if (message.clientMessageId !== clientMessageId) return [message];
+                            const admissionSeq = message.durableSeq ?? message.admissionAck?.admittedSeq ?? 0;
+                            if (promptedSeq !== undefined && promptedSeq < admissionSeq) return [message];
+                            return [];
+                        });
+                        const tombstoneEntries = Object.entries({
+                            ...(state.durableTombstones[key] ?? {}),
+                            [clientMessageId]: Math.max(
+                                promptedSeq ?? Number.MAX_SAFE_INTEGER,
+                                state.durableTombstones[key]?.[clientMessageId] ?? 0,
+                            ),
+                        });
+                        const tombstones = Object.fromEntries(tombstoneEntries.slice(-MAX_ADMITTED_HISTORY));
+                        const durableTombstones = { ...state.durableTombstones, [key]: tombstones };
+                        const tombstoneKeys = Object.keys(durableTombstones);
+                        if (tombstoneKeys.length > MAX_QUEUE_TARGETS) {
+                            for (const staleKey of tombstoneKeys.slice(0, tombstoneKeys.length - MAX_QUEUE_TARGETS)) {
+                                delete durableTombstones[staleKey];
+                            }
+                        }
+                        const cappedNext = capQueueMessages(next);
+                        if (!cappedNext.length) {
+                            const { [key]: _removed, ...rest } = state.queuedMessages;
+                            void _removed;
+                            return { queuedMessages: rest, durableTombstones };
+                        }
+                        return { queuedMessages: { ...state.queuedMessages, [key]: cappedNext }, durableTombstones };
+                    });
+                },
                 hardDeleteQueue: (target) => {
                     const key = getMessageQueueKey(target);
                     set((state) => {
@@ -469,7 +566,9 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const { [key]: _sendingRemoved, ...sendingIds } = state.sendingIds;
                         void _removed;
                         void _sendingRemoved;
-                        return { queuedMessages, sendingIds };
+                        const { [key]: _tombstonesRemoved, ...durableTombstones } = state.durableTombstones;
+                        void _tombstonesRemoved;
+                        return { queuedMessages, sendingIds, durableTombstones };
                     });
                 },
             }),
@@ -481,12 +580,13 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     queuedMessages: state.queuedMessages,
                     quarantinedLegacyMessages: state.quarantinedLegacyMessages,
                     followUpBehavior: state.followUpBehavior,
+                    durableTombstones: state.durableTombstones,
                 }),
                 migrate: migrateMessageQueueState,
                 onRehydrateStorage: () => (state) => {
                     if (!state) return;
                     const queuedMessages = normalizePersistedQueueMessages(state.queuedMessages);
-                    useMessageQueueStore.setState({ queuedMessages });
+                    useMessageQueueStore.setState({ queuedMessages, durableTombstones: state.durableTombstones ?? {} });
                 },
             }
         ),

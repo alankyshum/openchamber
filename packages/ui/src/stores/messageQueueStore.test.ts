@@ -9,7 +9,7 @@ import {
 } from "./messageQueueStore"
 
 beforeEach(() => {
-  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, sendingIds: {} })
+  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, sendingIds: {}, durableTombstones: {} })
 })
 
 describe("message queue runtime ownership", () => {

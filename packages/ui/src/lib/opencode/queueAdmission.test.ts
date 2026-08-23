@@ -39,6 +39,19 @@ describe('durable queue admission', () => {
     expect(buildQueueAdmissionPayload(input)).toEqual({ id: 'msg_test', prompt: { text: 'hello', agents: [{ name: 'worker' }] }, delivery: 'queue' });
   });
 
+  test('normalizes the OpenCode v2 messageID/timestamp acknowledgement shape', async () => {
+    nextResponse = () => Response.json({ data: {
+      admittedSeq: 4, messageID: 'msg_test', sessionID: 'ses_test', delivery: 'queue',
+      timestamp: 42, prompt: { text: 'hello' },
+    } });
+    const result = await admitToDurableQueue(input);
+    expect(result.outcome).toBe('admitted');
+    if (result.outcome === 'admitted') {
+      expect(result.acknowledgement.id).toBe('msg_test');
+      expect(result.acknowledgement.timeCreated).toBe(42);
+    }
+  });
+
   test('does not retry or throw on an ambiguous transport error', async () => {
     nextResponse = () => Promise.reject(new Error('connection lost'));
     const result = await admitToDurableQueue(input);

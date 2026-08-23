@@ -14,6 +14,7 @@ export type QueueAdmissionResult =
   | { outcome: 'ambiguous'; error: Error };
 
 const unsupportedRuntimes = new Map<string, number>();
+let runtimeGeneration = 0;
 const UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1000;
 export const ADMISSION_TIMEOUT_MS = 15_000;
 const inFlightAdmissions = new Map<string, Promise<QueueAdmissionResult>>();
@@ -50,17 +51,31 @@ export const parseAdmissionAck = (value: unknown, expected: QueueAdmissionInput)
   const data = (value as { data?: unknown } | null)?.data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const ack = data as Record<string, unknown>;
+  const id = typeof ack.messageID === 'string' ? ack.messageID : ack.id;
+  const timestamp = typeof ack.timestamp === 'number' ? ack.timestamp : ack.timeCreated;
   if (ack.delivery !== 'queue' || typeof ack.admittedSeq !== 'number' || !Number.isInteger(ack.admittedSeq) || ack.admittedSeq < 0
-    || ack.id !== expected.clientMessageId || ack.sessionID !== expected.sessionId
-    || typeof ack.timeCreated !== 'number' || !Number.isFinite(ack.timeCreated)
+    || id !== expected.clientMessageId || ack.sessionID !== expected.sessionId
+    || typeof timestamp !== 'number' || !Number.isFinite(timestamp)
     || !('prompt' in ack) || typeof ack.prompt !== 'object' || ack.prompt === null || Array.isArray(ack.prompt)) return null;
-  return ack as unknown as SessionInputAdmitted;
+  return {
+    admittedSeq: ack.admittedSeq,
+    id,
+    sessionID: ack.sessionID,
+    prompt: ack.prompt,
+    delivery: 'queue',
+    timeCreated: timestamp,
+    ...(typeof ack.promotedSeq === 'number' ? { promotedSeq: ack.promotedSeq } : {}),
+  };
 };
 
 // Capability is intentionally process-local. A runtime switch must never
 // inherit the verdict (or an old server's capabilities).
 if (typeof window !== 'undefined') {
-  window.addEventListener('openchamber:runtime-endpoint-changed', () => unsupportedRuntimes.clear());
+  window.addEventListener('openchamber:runtime-endpoint-changed', () => {
+    runtimeGeneration += 1;
+    unsupportedRuntimes.clear();
+    inFlightAdmissions.clear();
+  });
 }
 
 export const buildQueueAdmissionPayload = (input: QueueAdmissionInput) => {
@@ -78,6 +93,7 @@ export const buildQueueAdmissionPayload = (input: QueueAdmissionInput) => {
 
 /** The v2 route is deliberately separate from the legacy prompt_async SDK call. */
 export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<QueueAdmissionResult> {
+  const requestGeneration = runtimeGeneration;
   if (input.runtimeKey !== getRuntimeKey()) {
     return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
   }
@@ -91,13 +107,13 @@ export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<Q
   const key = `${input.runtimeKey}\n${input.sessionId}\n${input.clientMessageId}`;
   const existing = inFlightAdmissions.get(key);
   if (existing) return existing;
-  const request = admitToDurableQueueOnce(input);
+  const request = admitToDurableQueueOnce(input, requestGeneration);
   inFlightAdmissions.set(key, request);
   request.finally(() => inFlightAdmissions.delete(key)).catch(() => undefined);
   return request;
 }
 
-async function admitToDurableQueueOnce(input: QueueAdmissionInput): Promise<QueueAdmissionResult> {
+async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGeneration: number): Promise<QueueAdmissionResult> {
   // v2 has session-level model/agent/variant selection only. The caller keeps
   // its captured selection for local fallback, but admission intentionally
   // does not mutate session selection non-atomically.
@@ -120,7 +136,7 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput): Promise<Queu
     const error = cause instanceof Error ? cause : new Error(String(cause));
     return { outcome: 'failed', error };
   }
-  if (input.runtimeKey !== getRuntimeKey()) {
+  if (requestGeneration !== runtimeGeneration || input.runtimeKey !== getRuntimeKey()) {
     return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
   }
   let response: Response;
@@ -134,6 +150,9 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput): Promise<Queu
       ...(controller ? { signal: controller.signal } : {}),
     });
     if (response.ok) {
+      if (requestGeneration !== runtimeGeneration || input.runtimeKey !== getRuntimeKey()) {
+        return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
+      }
       const acknowledgement = parseAdmissionAck(await readResponseBody(() => response.json(), controller?.signal ?? null).catch(() => null), input);
       if (!acknowledgement) {
         return {
@@ -167,6 +186,7 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput): Promise<Queu
 }
 
 export const clearQueueAdmissionCapabilityCache = (): void => {
+  runtimeGeneration += 1;
   unsupportedRuntimes.clear();
   inFlightAdmissions.clear();
 };
