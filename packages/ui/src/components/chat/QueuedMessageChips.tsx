@@ -51,7 +51,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onRetry, onRe
         return first + (lines.length > 1 ? '...' : '');
     }, [message.content]);
 
-    const attachmentCount = message.attachments?.length ?? 0;
+    const attachmentCount = message.attachments?.length ?? message.remoteAttachmentCount ?? message.remoteAttachmentNames?.length ?? 0;
 
     return (
         <div
@@ -159,6 +159,7 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage, onRetryA
     );
     const popToInput = useMessageQueueStore((state) => state.popToInput);
     const reorderQueue = useMessageQueueStore((state) => state.reorderQueue);
+    const pendingQueueCount = queuedMessages.filter((message) => message.admissionState !== 'admitted').length;
 
     const sensors = useSensors(
         // Desktop: drag after a small move so other clicks still register.
@@ -200,7 +201,7 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage, onRetryA
             <div className="rounded-xl border border-border/60 bg-[var(--surface-elevated)] text-[var(--surface-elevated-foreground)] shadow-sm overflow-hidden">
                 <div className="flex w-full items-center gap-2 px-3 py-2 text-left">
                     <span className="typography-ui-label font-medium text-foreground flex-shrink-0">
-                        {t('chat.queuedMessage.title')} {queuedMessages.length}
+                        {t('chat.queuedMessage.title')} {pendingQueueCount}
                     </span>
                     <Icon name="time" className="ml-auto h-4 w-4 text-muted-foreground" aria-hidden="true" />
                 </div>
