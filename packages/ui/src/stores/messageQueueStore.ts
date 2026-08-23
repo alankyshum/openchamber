@@ -111,11 +111,9 @@ export const normalizePersistedQueueMessages = (
                 return {
                     ...message,
                     // An interrupted admission is intentionally copy/dismiss
-                    // only. Drop data URLs while migrating it so a stale
-                    // uncertain item cannot retain binary payloads forever.
-                    ...(interrupted
-                        ? { attachments: undefined, sendConfig: undefined }
-                        : {}),
+                    // only, but its attachments are still the user's only
+                    // recoverable copy. Keep them until the user chooses what
+                    // to do; capQueueMessages strips them for admitted history.
                     admissionState: interrupted ? 'admission-unknown' : (message.admissionState ?? 'local'),
                 };
             });
@@ -445,7 +443,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
                 markAdmissionUnknown: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-unknown' as const, attachments: undefined, sendConfig: undefined } : message)) } }));
+                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId ? { ...message, admissionState: 'admission-unknown' as const, sendConfig: undefined } : message)) } }));
                 },
                 recoverAdmissionToInput: (target, messageId) => {
                     const key = getMessageQueueKey(target);

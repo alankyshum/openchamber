@@ -112,16 +112,33 @@ describe("in-flight queued sends", () => {
   })
 
   test("migration does not turn an interrupted admission into a resend", () => {
-    const migrated = migrateMessageQueueState({ queuedMessages: { key: [{ id: 'q', content: 'text', createdAt: 1, admissionState: 'pending-admission' }] } }, 3)
+    const attachment = { id: 'file', file: new File([], 'a.txt'), dataUrl: 'data:text/plain;base64,a', mimeType: 'text/plain', filename: 'a.txt', size: 1, source: 'local' as const }
+    const migrated = migrateMessageQueueState({ queuedMessages: { key: [{ id: 'q', content: 'text', createdAt: 1, admissionState: 'pending-admission', attachments: [attachment] }] } }, 3)
     expect(migrated.queuedMessages?.key?.[0]?.admissionState).toBe('admission-unknown')
+    expect(migrated.queuedMessages?.key?.[0]?.attachments).toEqual([attachment])
   })
 
   test("same-version hydration normalizes pending items and expires old admitted history", () => {
+    const attachment = { id: 'pending-file', file: new File([], 'pending.txt'), dataUrl: 'data:text/plain;base64,p', mimeType: 'text/plain', filename: 'pending.txt', size: 1, source: 'local' as const }
     const hydrated = normalizePersistedQueueMessages({ key: [
-      { id: 'pending', content: 'keep', createdAt: Date.now(), admissionState: 'pending-admission' },
-      { id: 'old', content: 'drop', createdAt: 1, admissionState: 'admitted' },
+      { id: 'pending', content: 'keep', createdAt: Date.now(), admissionState: 'pending-admission', attachments: [attachment] },
+      { id: 'unknown', content: 'recover', createdAt: Date.now(), admissionState: 'admission-unknown', attachments: [attachment] },
+      { id: 'old', content: 'drop', createdAt: 1, admissionState: 'admitted', attachments: [attachment] },
     ]})
-    expect(hydrated.key?.map((message) => [message.id, message.admissionState])).toEqual([['pending', 'admission-unknown']])
+    expect(hydrated.key?.map((message) => [message.id, message.admissionState])).toEqual([
+      ['pending', 'admission-unknown'],
+      ['unknown', 'admission-unknown'],
+    ])
+    expect(hydrated.key?.find((message) => message.id === 'pending')?.attachments).toEqual([attachment])
+    expect(hydrated.key?.find((message) => message.id === 'unknown')?.attachments).toEqual([attachment])
+  })
+
+  test("hydration strips attachment payloads from admitted history", () => {
+    const attachment = { id: 'server-file', file: new File([], 'server.txt'), dataUrl: 'data:text/plain;base64,s', mimeType: 'text/plain', filename: 'server.txt', size: 1, source: 'local' as const }
+    const hydrated = normalizePersistedQueueMessages({ key: [
+      { id: 'admitted', content: 'server-owned', createdAt: Date.now(), admissionState: 'admitted', attachments: [attachment] },
+    ]})
+    expect(hydrated.key?.[0]?.attachments).toBe(undefined)
   })
 
   test("bounds admitted history without evicting recoverable messages", () => {
@@ -170,6 +187,7 @@ describe("in-flight queued sends", () => {
     expect(pendingAAfterUnknownB?.admissionState).toBe('pending-admission')
     expect(pendingAAfterUnknownB?.attachments).toEqual([attachment])
     expect(pendingAAfterUnknownB?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
+    expect(queue.find((message) => message.id === b)?.attachments).toEqual([attachment])
 
     useMessageQueueStore.getState().markAdmissionLocal(target, a)
     queue = useMessageQueueStore.getState().getQueueForTarget(target)
