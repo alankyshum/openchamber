@@ -41,6 +41,7 @@ All notable changes to this project will be documented in this file.
 - Themes: custom themes loaded through symlinks now work (thanks to @divyam234).
 - Debug: the debug panel (Ctrl/Cmd+Shift+D) has a Requests tab showing in-flight requests and their age over the last five minutes (thanks to @tomzx).
 - Reliability: switching sessions quickly no longer saves the wrong scroll position, and the log no longer fills with worktree warnings for non-Git folders (thanks to @herjarsa); startup cleanup of leftover processes no longer blocks the server on Windows (thanks to @bashrusakh).
+- **Chat:** queued follow-ups now survive runtime and device changes through OpenCode's durable queue.
 
 ## [1.21.0] - 2026-08-26
 
