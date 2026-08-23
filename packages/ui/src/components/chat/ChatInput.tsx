@@ -1055,12 +1055,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const restored = recoverAdmissionToInput(messageQueueTarget, queuedMessage.id);
         if (!restored) return;
         setMessage(restored.content);
-        if (restored.attachments?.length) {
-            // Recovery is an explicit replacement of the uncertain queued
-            // draft. Do not merge it with files from a newer, unrelated live
-            // draft: that could send the wrong files or duplicate attachments.
-            useInputStore.getState().setAttachedFiles(restored.attachments);
-        }
+        // Recovery is an explicit replacement of the uncertain queued draft.
+        // Do not merge it with files from a newer, unrelated live draft: that
+        // could send the wrong files or duplicate attachments. Clear files too
+        // when the recovered message was text-only.
+        useInputStore.getState().setAttachedFiles(restored.attachments ?? []);
         composerRef.current?.focus();
     }, [messageQueueTarget, recoverAdmissionToInput]);
 
