@@ -533,8 +533,6 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.rename.cancel": "Скасувати перейменування сесії",
   "sessions.sidebar.session.menu.unpin": "Відкріпити сесію",
   "sessions.sidebar.session.menu.pin": "Прикріпити сесію",
-  "sessions.sidebar.session.menu.markUnread": "Позначити як непрочитане",
-  "sessions.sidebar.session.menu.markRead": "Позначити як прочитане",
   "sessions.sidebar.session.menu.share": "Поділитися",
   "sessions.sidebar.session.menu.copied": "Скопійовано",
   "sessions.sidebar.session.menu.copyLink": "Копіювати посилання",
