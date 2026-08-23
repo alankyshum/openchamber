@@ -79,6 +79,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onRetry, onRe
             {state === 'admission-failed' && <Button type="button" variant="secondary" size="xs" onClick={() => onRestore(message)}>{t('chat.queuedMessage.restore')}</Button>}
             {state === 'admission-failed' && <Button type="button" variant="secondary" size="xs" onClick={() => onRetry(message)} aria-label={t('chat.queuedMessage.retryAdmission')}>{t('chat.queuedMessage.retryAdmission')}</Button>}
             {state === 'admission-unknown' && <Button type="button" variant="secondary" size="xs" title={t('chat.queuedMessage.admissionUnknown')} onClick={() => onCopy(message)}>{t('chat.queuedMessage.copy')}</Button>}
+            {state === 'admission-unknown' && <Button type="button" variant="secondary" size="xs" onClick={() => onRestore(message)}>{t('chat.queuedMessage.restore')}</Button>}
             {state === 'admission-unknown' && <Button type="button" variant="secondary" size="xs" onClick={() => onDismiss(message)}>{t('chat.queuedMessage.dismiss')}</Button>}
             {state === 'local' && <Button
                 type="button"
