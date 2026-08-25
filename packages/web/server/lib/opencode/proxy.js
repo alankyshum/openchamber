@@ -961,6 +961,21 @@ export const registerOpenCodeProxy = (app, deps) => {
         proxyReq.setHeader('accept-encoding', 'identity');
         replayParsedBody(proxyReq, req);
       },
+      proxyRes: (proxyRes) => {
+        for (const key of Object.keys(proxyRes.headers || {})) {
+          if (!shouldForwardProxyResponseHeader(key)) {
+            delete proxyRes.headers[key];
+          }
+        }
+      },
+      error: (err, req, res) => {
+        console.error('[proxy] OpenCode durable proxy error:', err.message);
+        if (req?.[PROXY_TIMEOUT_MARKER]) {
+          return;
+        }
+        const statusCode = isProxyTimeoutError(err) ? 504 : 503;
+        sendProxyErrorResponse(res, statusCode);
+      },
     },
   });
   const interactiveOAuthProxy = createApiProxy(INTERACTIVE_OAUTH_TIMEOUT_MS);

@@ -44,6 +44,8 @@ const readResponseBody = async <T>(
 };
 
 type SessionInputAdmitted = {
+  // The HTTP acknowledgement's sequence is the durable per-session event
+  // sequence. Replays compare it with prompted event sequences for ordering.
   admittedSeq: number; id: string; sessionID: string;
   prompt: unknown; delivery: 'queue'; timeCreated: number; promotedSeq?: number;
 };

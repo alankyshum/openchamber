@@ -348,6 +348,74 @@ describe('OpenCode proxy SSE forwarding', () => {
     expect(Number(data.contentLength)).toBeGreaterThan(0);
   });
 
+  it('filters durable prompt/history response headers with the generic proxy allowlist', async () => {
+    const upstream = express();
+    upstream.get('/api/session/abc/history', (_req, res) => {
+      res.setHeader('X-Durable-Test', 'kept');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.json({ data: [], hasMore: false });
+    });
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({ openCodePort: upstreamPort, openCodeBaseUrl: externalBaseUrl, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/history`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-durable-test')).toBe('kept');
+    expect(response.headers.get('content-encoding')).toBeNull();
+    await expect(response.json()).resolves.toEqual({ data: [], hasMore: false });
+  });
+
+  it('returns 503 for durable proxy connection errors', async () => {
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({ openCodePort: 1, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `http://127.0.0.1:1${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/history`);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: 'OpenCode service unavailable' });
+  });
+
+  it('returns 504 for a durable proxy timeout', async () => {
+    const upstream = express();
+    upstream.get('/api/session/abc/history', (_req, _res) => {});
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0, LONG_REQUEST_TIMEOUT_MS: 50,
+      getRuntime: () => ({ openCodePort: upstreamPort, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/history`);
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toEqual({ error: 'OpenCode upstream timed out' });
+  });
+
   it('sanitizes experimental session list responses and forwards query params', async () => {
     let seenQuery = null;
     let seenAuth = null;
