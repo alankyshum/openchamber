@@ -105,6 +105,7 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
   signal?.addEventListener('abort', abort, { once: true })
   replayControllers.set(key, controller)
   replayGenerations.set(key, generation)
+  let completedSuccessfully = false
   const task = (async () => {
     // The first replay always asks for sequence zero. Live events observed
     // while it is in flight must not move that starting point.
@@ -136,12 +137,16 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
       if (next <= pageAfter && hasMore) return
       after = next
     }
+    if (!hasMore && !controller.signal.aborted && replayGenerations.get(key) === generation && !generation.invalidated) {
+      completedSuccessfully = true
+    }
   })().catch(() => undefined).finally(() => {
     clearTimeout(timeout)
     signal?.removeEventListener('abort', abort)
     generation.complete = true
     if (replayGenerations.get(key) === generation) {
-      if (!generation.invalidated) initializedHistory.add(key)
+      // A failed or cancelled first replay must start at sequence zero next time.
+      if (completedSuccessfully) initializedHistory.add(key)
       inFlight.delete(key)
       replayControllers.delete(key)
       replayGenerations.delete(key)

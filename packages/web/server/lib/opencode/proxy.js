@@ -147,6 +147,14 @@ export const normalizeForwardedDirectoryHeaders = (headers) => {
   return headers;
 };
 
+// The v2 session routes already include /api. The generic proxy strips that
+// prefix for legacy OpenCode routes, so durable prompt/history requests use
+// this path builder instead.
+export const buildDurableV2ProxyPath = (requestUrl) => {
+  const value = typeof requestUrl === 'string' && requestUrl.length > 0 ? requestUrl : '/';
+  return value.startsWith('/api') ? value : `/api${value.startsWith('/') ? value : `/${value}`}`;
+};
+
 const waitForSseDrain = (res, signal) => new Promise((resolve) => {
   if (signal?.aborted || res.writableEnded || res.destroyed) {
     resolve();
@@ -941,7 +949,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     // original URL so the upstream receives the complete v2 route.
     pathRewrite: (_path, req) => {
       const originalUrl = typeof req.originalUrl === 'string' ? req.originalUrl : _path;
-      return originalUrl.startsWith('/api') ? originalUrl : `/api${originalUrl.startsWith('/') ? originalUrl : `/${originalUrl}`}`;
+      return buildDurableV2ProxyPath(originalUrl);
     },
     timeout: PROXY_REQUEST_TIMEOUT_MS,
     proxyTimeout: PROXY_REQUEST_TIMEOUT_MS,
@@ -975,6 +983,7 @@ export const registerOpenCodeProxy = (app, deps) => {
   app.use('/api', applyProxyResponseDeadline);
   app.post('/api/provider/:providerID/oauth/callback', interactiveOAuthProxy);
   app.post('/api/session/:sessionID/prompt', durablePromptProxy);
+  app.get('/api/session/:sessionID/history', durablePromptProxy);
   // OpenCode's native MCP OAuth flow: the request blocks until the user
   // finishes authorization in the browser (up to OpenCode's 5-minute callback
   // timeout), so it needs the interactive-OAuth deadline, not the default one.

@@ -54,6 +54,34 @@ describe('VS Code API proxy aborts', () => {
     }
   });
 
+  test('forwards durable history requests with the exact v2 path and query', async () => {
+    const originalFetch = globalThis.fetch;
+    let upstreamUrl = '';
+    try {
+      globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+        upstreamUrl = String(input);
+        return Response.json({ data: [], hasMore: false });
+      }) as typeof fetch;
+
+      const response = await handleProxyBridgeMessage(
+        { id: 'history_1', type: 'api:session:history', payload: {
+          path: '/api/session/ses-1/history?directory=%2Frepo&after=7&limit=20',
+        } },
+        ctx,
+        deps,
+      );
+
+      const upstream = new URL(upstreamUrl);
+      assert.equal(upstream.pathname, '/api/session/ses-1/history');
+      assert.deepEqual([...upstream.searchParams.entries()], [
+        ['directory', '/repo'], ['after', '7'], ['limit', '20'],
+      ]);
+      assert.equal(response?.success, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('aborts non-SSE api:proxy fetches by bridge request id', async () => {
     const originalFetch = globalThis.fetch;
     let capturedSignal: AbortSignal | undefined;

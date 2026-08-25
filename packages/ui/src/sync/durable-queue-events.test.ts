@@ -229,4 +229,31 @@ describe('durable queue event reconciliation', () => {
       'msg_old', 'msg_new', 'msg_last',
     ])
   })
+
+  test('retries a non-ok first replay from sequence zero', async () => {
+    responses = [new Response('unavailable', { status: 503 }), Response.json({ data: [], hasMore: false })]
+    await replayDurableQueueHistory(target)
+    await replayDurableQueueHistory(target)
+    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+  })
+
+  test('retries a thrown first replay from sequence zero', async () => {
+    responses = [Promise.reject(new Error('connection lost')), Response.json({ data: [], hasMore: false })]
+    await replayDurableQueueHistory(target)
+    await replayDurableQueueHistory(target)
+    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+  })
+
+  test('retries an aborted first replay from sequence zero', async () => {
+    const controller = new AbortController()
+    responses = [Response.json({ data: [], hasMore: false }), Response.json({ data: [], hasMore: false })]
+    const first = replayDurableQueueHistory(target, controller.signal)
+    controller.abort()
+    await first
+    await replayDurableQueueHistory(target)
+    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+  })
 })

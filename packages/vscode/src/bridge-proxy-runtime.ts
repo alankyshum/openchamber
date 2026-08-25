@@ -327,6 +327,26 @@ export async function handleProxyBridgeMessage(
       }
     }
 
+    case 'api:session:history': {
+      const apiUrl = await waitForApiUrl(ctx?.manager);
+      if (!apiUrl) return { id, type, success: true, data: deps.buildUnavailableApiResponse() };
+      const { path: requestPath, headers } = (payload || {}) as { path?: string; headers?: Record<string, string> };
+      const normalizedPath = typeof requestPath === 'string' ? requestPath.trim() : '';
+      if (!/^\/api\/session\/[^/]+\/history(?:\?.*)?$/.test(normalizedPath)) {
+        return { id, type, success: true, data: { status: 400, headers: { 'content-type': 'application/json' }, bodyText: JSON.stringify({ error: 'Invalid session history proxy path' }) } };
+      }
+      const targetUrl = `${apiUrl.replace(/\/+$/, '')}${normalizedPath}`;
+      const requestHeaders = { ...deps.sanitizeForwardHeaders(headers), ...ctx?.manager?.getOpenCodeAuthHeaders() };
+      const abortController = new AbortController();
+      proxyAbortControllers.set(id, abortController);
+      try {
+        const data = await performApiProxyFetch(targetUrl, 'GET', requestHeaders, undefined, abortController.signal, deps);
+        return { id, type, success: true, data };
+      } finally {
+        proxyAbortControllers.delete(id);
+      }
+    }
+
     default:
       return null;
   }

@@ -521,10 +521,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                 admittedSeq: admission.admittedSeq ?? 0,
                                 timeCreated: admission.timeCreated ?? Date.now(),
                             },
-                            // Keep any local copy that raced the authoritative
-                            // event. The admitted state is never sendable, and
-                            // history capping removes payloads later, but this
-                            // preserves recovery data until then.
+                             // Keep local payload fields that raced the authoritative
+                             // event until normal queue capping removes them.
                             attachments: existing?.attachments,
                             sendConfig: existing?.sendConfig,
                             durableSeq: admission.durableSeq,

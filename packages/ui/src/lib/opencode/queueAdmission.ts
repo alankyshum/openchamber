@@ -187,7 +187,10 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
       unsupportedRuntimes.set(input.runtimeKey, Date.now());
       return { outcome: 'unsupported', error };
     }
-    if (response.status === 408 || response.status === 429 || response.status >= 500) {
+    if (response.status === 429) {
+      return { outcome: 'failed', error };
+    }
+    if (response.status === 408 || response.status >= 500) {
       return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
     }
     if (response.status === 404 && !/session.*not.?found|sessionnotfound/i.test(detail)) {

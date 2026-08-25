@@ -109,8 +109,13 @@ describe('durable queue admission', () => {
     expect((await admitToDurableQueue(input)).outcome).toBe('failed');
   });
 
+  test('classifies rate-limit admission failures as definitive', async () => {
+    nextResponse = () => new Response('rate limited', { status: 429 });
+    expect((await admitToDurableQueue(input)).outcome).toBe('failed');
+  });
+
   test('treats potentially committed HTTP failures as ambiguous', async () => {
-    for (const status of [408, 429, 500, 502, 503, 504]) {
+    for (const status of [408, 500, 502, 503, 504]) {
       clearQueueAdmissionCapabilityCache();
       runtimeFetchCalls.length = 0;
       nextResponse = () => new Response('upstream failure', { status });
