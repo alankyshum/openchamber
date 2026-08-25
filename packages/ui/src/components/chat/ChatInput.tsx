@@ -919,8 +919,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const inputSnapshot = getCurrentInputSnapshot();
         if (!inputSnapshot.hasContent || !currentSessionId || !messageQueueTarget) return;
 
-        const drafts = inlineDraftTarget ? consumeDrafts(inlineDraftTarget) : [];
-        const contextParts = drafts.map((draft) => createContextPart(contextPayloadFromDraft(draft)));
         const messageToQueue = inputSnapshot.message.replace(/^\n+|\n+$/g, '');
         const parsedMention = parseAgentMentions(messageToQueue, agents);
         // Keep the original mention in the local fallback. Its existing drain
@@ -931,6 +929,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         if (admissionInFlightRef.current.has(admissionKey)) return;
         const admissionToken = {};
         admissionInFlightRef.current.set(admissionKey, admissionToken);
+        const drafts = inlineDraftTarget ? consumeDrafts(inlineDraftTarget) : [];
+        const contextParts = drafts.map((draft) => createContextPart(contextPayloadFromDraft(draft)));
 
         // The id is part of the v2 request and is stable for the lifetime of
         // this queued item. Never generate a replacement after an uncertain

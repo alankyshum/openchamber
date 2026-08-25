@@ -88,8 +88,12 @@ export const applyDurableQueueEvent = (target: MessageQueueTarget, event: Durabl
     useMessageQueueStore.getState().removeDurableAdmission(target, admission.id, sequence)
   }
   if (sequence !== undefined) {
-    cursors.set(queueKey(target), Math.max(sequence, cursors.get(queueKey(target)) ?? 0))
-    if (cursors.size > MAX_CURSOR_ENTRIES) cursors.delete(cursors.keys().next().value as string)
+    const key = queueKey(target)
+    cursors.set(key, Math.max(sequence, cursors.get(key) ?? 0))
+    if (cursors.size > MAX_CURSOR_ENTRIES) {
+      const oldestKey = cursors.keys().next().value
+      if (typeof oldestKey === 'string' && oldestKey !== key) cursors.delete(oldestKey)
+    }
   }
 }
 

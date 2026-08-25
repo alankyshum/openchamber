@@ -188,6 +188,21 @@ describe('durable queue event reconciliation', () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(otherDirectoryTarget).map((item) => item.clientMessageId)).toEqual(['msg_other'])
   })
 
+  test('keeps the current cursor when updating the oldest entry at capacity', () => {
+    const targets = Array.from({ length: 100 }, (_, index) => createMessageQueueTarget(`ses-${index}`, '/repo', 'runtime-a')!)
+    responses = [Response.json({ data: [], hasMore: false })]
+    return replayDurableQueueHistory(targets[0]!).then(async () => {
+      for (const [index, cursorTarget] of targets.slice(1).entries()) {
+        applyDurableQueueEvent(cursorTarget, admitted(`msg-${index}`, index + 2, `${index}`))
+      }
+      applyDurableQueueEvent(targets[0]!, admitted('msg-oldest', 101, 'updated'))
+
+      responses = [Response.json({ data: [], hasMore: false })]
+      await replayDurableQueueHistory(targets[0]!)
+      expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '101' })
+    })
+  })
+
   test('replaces a raced local item without changing its FIFO index', () => {
     const first = useMessageQueueStore.getState().addToQueue(target, { content: 'first' })
     const raced = useMessageQueueStore.getState().addToQueue(target, { content: 'raced', clientMessageId: 'msg_fifo' })

@@ -94,8 +94,6 @@ export const buildQueueAdmissionPayload = (input: QueueAdmissionInput) => {
   };
 };
 
-/** Build the request using the v2 contract. Kept pure for exact-payload tests. */
-
 /** The v2 route is deliberately separate from the legacy prompt_async SDK call. */
 export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<QueueAdmissionResult> {
   const requestGeneration = runtimeGeneration;
