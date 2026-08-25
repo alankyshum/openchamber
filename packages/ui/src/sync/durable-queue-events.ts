@@ -91,8 +91,12 @@ export const applyDurableQueueEvent = (target: MessageQueueTarget, event: Durabl
     const key = queueKey(target)
     cursors.set(key, Math.max(sequence, cursors.get(key) ?? 0))
     if (cursors.size > MAX_CURSOR_ENTRIES) {
-      const oldestKey = cursors.keys().next().value
-      if (typeof oldestKey === 'string' && oldestKey !== key) cursors.delete(oldestKey)
+      for (const oldestKey of cursors.keys()) {
+        if (oldestKey !== key) {
+          cursors.delete(oldestKey)
+          break
+        }
+      }
     }
   }
 }
