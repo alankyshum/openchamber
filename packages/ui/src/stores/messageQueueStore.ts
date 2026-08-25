@@ -5,6 +5,7 @@ import type { AttachedFile } from './types/sessionTypes';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { normalizePath } from '@/lib/pathNormalization';
+import type { ContextPart } from '@/lib/messages/contextParts';
 
 export type FollowUpBehavior = 'steer' | 'queue';
 
@@ -44,6 +45,8 @@ export interface QueuedMessage {
     id: string;
     content: string;
     attachments?: AttachedFile[];
+    /** Structured context captured when this item was queued. */
+    contextParts?: ContextPart[];
     createdAt: number;
     /** Ownership of this item. Only local items may be sent by the client. */
     admissionState?: 'local' | 'pending-admission' | 'admitted' | 'admission-failed' | 'admission-unknown';
@@ -75,7 +78,7 @@ export type DurableQueueAdmission = {
     sessionID: string;
     admittedSeq?: number;
     timeCreated?: number;
-    prompt?: { text?: string; files?: Array<{ uri: string; name?: string }> };
+    prompt?: { text?: string; files?: Array<{ uri: string; name?: string }>; parts?: ContextPart[] };
     durableSeq?: number;
 };
 
@@ -105,9 +108,13 @@ const capQueueMessages = (messages: QueuedMessage[]): QueuedMessage[] => {
         .slice(-MAX_MESSAGES_PER_QUEUE);
     const retained = new Map<number, QueuedMessage>();
     for (const { message, index } of admittedCandidates.slice(-MAX_ADMITTED_HISTORY)) {
-        retained.set(index, message.durableSeq === undefined
-            ? { ...message, attachments: undefined, sendConfig: undefined }
-            : message);
+        retained.set(index, {
+            ...message,
+            // Admission is authoritative regardless of which ordering proof
+            // the event carried. Never persist resendable payloads for it.
+            attachments: undefined,
+            sendConfig: undefined,
+        });
     }
     for (const { message, index } of pendingCandidates.slice(-MAX_PENDING_ADMISSIONS)) retained.set(index, message);
     for (const { message, index } of recoverableCandidates) retained.set(index, message);
@@ -249,6 +256,11 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         admissionState: message.admissionState ?? 'local',
                         clientMessageId: message.clientMessageId,
                         admissionAck: message.admissionAck,
+                        contextParts: message.contextParts,
+                        durableSeq: message.durableSeq,
+                        promptedSeq: message.promptedSeq,
+                        remoteAttachmentNames: message.remoteAttachmentNames,
+                        remoteAttachmentCount: message.remoteAttachmentCount,
                         sendConfig: message.sendConfig,
                     };
 

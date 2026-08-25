@@ -930,6 +930,31 @@ export const registerOpenCodeProxy = (app, deps) => {
   });
 
   const apiProxy = createApiProxy(PROXY_REQUEST_TIMEOUT_MS);
+  // The v2 prompt endpoint lives under /api upstream. Keep this route out of
+  // the legacy generic proxy, whose historical rewrite intentionally removes
+  // that prefix for older OpenCode endpoints.
+  const durablePromptProxy = createProxyMiddleware({
+    target: resolveProxyTarget(),
+    get agent() { return resolveOpenCodeProxyAgent(); },
+    changeOrigin: true,
+    // Express strips the route mount before invoking this middleware. Use the
+    // original URL so the upstream receives the complete v2 route.
+    pathRewrite: (_path, req) => {
+      const originalUrl = typeof req.originalUrl === 'string' ? req.originalUrl : _path;
+      return originalUrl.startsWith('/api') ? originalUrl : `/api${originalUrl.startsWith('/') ? originalUrl : `/${originalUrl}`}`;
+    },
+    timeout: PROXY_REQUEST_TIMEOUT_MS,
+    proxyTimeout: PROXY_REQUEST_TIMEOUT_MS,
+    router: () => resolveProxyTarget(),
+    on: {
+      proxyReq: (proxyReq, req) => {
+        const authHeaders = getOpenCodeAuthHeaders();
+        if (authHeaders.Authorization) proxyReq.setHeader('Authorization', authHeaders.Authorization);
+        proxyReq.setHeader('accept-encoding', 'identity');
+        replayParsedBody(proxyReq, req);
+      },
+    },
+  });
   const interactiveOAuthProxy = createApiProxy(INTERACTIVE_OAUTH_TIMEOUT_MS);
 
   // Best-effort fallback for stale clients still sending symlink paths.
@@ -949,6 +974,7 @@ export const registerOpenCodeProxy = (app, deps) => {
 
   app.use('/api', applyProxyResponseDeadline);
   app.post('/api/provider/:providerID/oauth/callback', interactiveOAuthProxy);
+  app.post('/api/session/:sessionID/prompt', durablePromptProxy);
   // OpenCode's native MCP OAuth flow: the request blocks until the user
   // finishes authorization in the browser (up to OpenCode's 5-minute callback
   // timeout), so it needs the interactive-OAuth deadline, not the default one.

@@ -139,6 +139,7 @@ import {
     toServerFileUrl,
 } from './composer/attachments/filePaths';
 import { buildOutgoingMessage } from './composer/submit/buildOutgoingMessage';
+import { contextPayloadFromDraft, createContextPart } from '@/lib/messages/contextParts';
 import {
     buildCommandVariables,
     canRunCommand,
@@ -768,7 +769,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const markAdmissionUnknown = useMessageQueueStore((state) => state.markAdmissionUnknown);
     const recoverAdmissionToInput = useMessageQueueStore((state) => state.recoverAdmissionToInput);
     const dismissAdmissionUnknown = useMessageQueueStore((state) => state.dismissAdmissionUnknown);
-    const admissionInFlightRef = React.useRef<Set<string>>(new Set());
+    const admissionInFlightRef = React.useRef<Map<string, object>>(new Map());
 
     // Inline comment drafts
     const inlineDraftSessionKey = currentSessionId ?? (newSessionDraftOpen ? 'draft' : '');
@@ -918,8 +919,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const inputSnapshot = getCurrentInputSnapshot();
         if (!inputSnapshot.hasContent || !currentSessionId || !messageQueueTarget) return;
 
-        // Context drafts stay in their store: the send that later delivers the
-        // queue consumes them and attaches them as structured context parts.
+        const drafts = inlineDraftTarget ? consumeDrafts(inlineDraftTarget) : [];
+        const contextParts = drafts.map((draft) => createContextPart(contextPayloadFromDraft(draft)));
         const messageToQueue = inputSnapshot.message.replace(/^\n+|\n+$/g, '');
         const parsedMention = parseAgentMentions(messageToQueue, agents);
         // Keep the original mention in the local fallback. Its existing drain
@@ -928,7 +929,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const attachmentsToQueue = sanitizeAttachmentsForSend(attachedFiles);
         const admissionKey = `${messageQueueTarget.runtimeKey}\n${messageQueueTarget.sessionId}\n${messageToQueue}\n${attachmentsToQueue.map((file) => file.id).join(',')}`;
         if (admissionInFlightRef.current.has(admissionKey)) return;
-        admissionInFlightRef.current.add(admissionKey);
+        const admissionToken = {};
+        admissionInFlightRef.current.set(admissionKey, admissionToken);
 
         // The id is part of the v2 request and is stable for the lifetime of
         // this queued item. Never generate a replacement after an uncertain
@@ -937,6 +939,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const queuedId = addToQueue(messageQueueTarget, {
             content: messageToQueue,
             attachments: attachmentsToQueue.length > 0 ? attachmentsToQueue : undefined,
+            contextParts,
             admissionState: 'pending-admission',
             clientMessageId,
             sendConfig: currentProviderId && currentModelId ? {
@@ -967,7 +970,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             composerRef.current?.focus();
         }
         try {
-            const admission = await admitToDurableQueue({
+            const admission = contextParts.length
+                ? { outcome: 'unsupported' as const, error: new Error('Durable queue does not support structured context') }
+                : await admitToDurableQueue({
                 runtimeKey: messageQueueTarget.runtimeKey,
                 sessionId: messageQueueTarget.sessionId,
                 directory: messageQueueTarget.directory,
@@ -975,7 +980,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 files: attachmentsToQueue,
                 agentMentionName: parsedMention.mention?.name,
                 clientMessageId,
-            });
+                });
             if (admission.outcome === 'admitted') {
                 markAdmissionAdmitted(messageQueueTarget, queuedId, {
                     admittedSeq: admission.acknowledgement.admittedSeq,
@@ -992,9 +997,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 markAdmissionFailed(messageQueueTarget, queuedId);
             }
         } finally {
-            admissionInFlightRef.current.delete(admissionKey);
+            if (admissionInFlightRef.current.get(admissionKey) === admissionToken) {
+                admissionInFlightRef.current.delete(admissionKey);
+            }
         }
-    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, attachedFiles, sanitizeAttachmentsForSend, addToQueue, clearAttachedFiles, isMobile, currentProviderId, currentModelId, currentAgentName, currentVariant, markAdmissionPending, markAdmissionLocal, markAdmissionAdmitted, markAdmissionFailed, markAdmissionUnknown, agents, scrollToLatest]);
+    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inlineDraftTarget, attachedFiles, sanitizeAttachmentsForSend, addToQueue, clearAttachedFiles, isMobile, consumeDrafts, currentProviderId, currentModelId, currentAgentName, currentVariant, markAdmissionPending, markAdmissionLocal, markAdmissionAdmitted, markAdmissionFailed, markAdmissionUnknown, agents, scrollToLatest]);
 
     const handleQueuedMessageEdit = React.useCallback((content: string) => {
         setMessage(content);
@@ -1024,9 +1031,14 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const clientMessageId = queuedMessage.clientMessageId ?? `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
         const retryKey = `${messageQueueTarget.runtimeKey}\n${messageQueueTarget.sessionId}\n${clientMessageId}`;
         if (admissionInFlightRef.current.has(retryKey)) return;
-        admissionInFlightRef.current.add(retryKey);
+        const retryToken = {};
+        admissionInFlightRef.current.set(retryKey, retryToken);
         markAdmissionPending(messageQueueTarget, queuedMessage.id, clientMessageId);
         try {
+            if (queuedMessage.contextParts?.length) {
+                markAdmissionLocal(messageQueueTarget, queuedMessage.id);
+                return;
+            }
             const parsedMention = parseAgentMentions(queuedMessage.content, agents);
             const result = await admitToDurableQueue({
                 runtimeKey: messageQueueTarget.runtimeKey,
@@ -1046,7 +1058,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             else if (result.outcome === 'ambiguous') markAdmissionUnknown(messageQueueTarget, queuedMessage.id);
             else markAdmissionFailed(messageQueueTarget, queuedMessage.id);
         } finally {
-            admissionInFlightRef.current.delete(retryKey);
+            if (admissionInFlightRef.current.get(retryKey) === retryToken) {
+                admissionInFlightRef.current.delete(retryKey);
+            }
         }
     }, [messageQueueTarget, markAdmissionPending, markAdmissionLocal, markAdmissionAdmitted, markAdmissionFailed, markAdmissionUnknown, agents]);
 

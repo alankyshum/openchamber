@@ -16,6 +16,7 @@ mock.module('@/lib/opencode/client', () => ({ opencodeClient: { normalizeAttachm
 } } }));
 
 import { buildQueueAdmissionPayload, admitToDurableQueue, clearQueueAdmissionCapabilityCache } from './queueAdmission';
+import { createContextPart } from '@/lib/messages/contextParts';
 
 const input = { runtimeKey: 'runtime-test', sessionId: 'ses_test', directory: '/repo', text: 'hello', agentMentionName: 'worker', clientMessageId: 'msg_test' };
 
@@ -37,6 +38,16 @@ describe('durable queue admission', () => {
     expect(request.query).toEqual({ directory: '/repo' });
     expect(request.body).toBe(JSON.stringify({ id: 'msg_test', prompt: { text: 'hello', agents: [{ name: 'worker' }] }, delivery: 'queue' }));
     expect(buildQueueAdmissionPayload(input)).toEqual({ id: 'msg_test', prompt: { text: 'hello', agents: [{ name: 'worker' }] }, delivery: 'queue' });
+  });
+
+  test('keeps structured context on the local fallback', async () => {
+    const context = { text: 'Comment on `src/app.ts`:', synthetic: true as const, metadata: { openchamberContext: {
+      kind: 'code-comment' as const, source: 'diff' as const, fileLabel: 'src/app.ts', startLine: 3, endLine: 5,
+      language: 'ts', code: 'const x = 1;', text: 'fix this',
+    } } };
+    const result = await admitToDurableQueue({ ...input, contextParts: [context] });
+    expect(result.outcome).toBe('unsupported');
+    expect(runtimeFetchCalls).toHaveLength(0);
   });
 
   test('normalizes the OpenCode v2 messageID/timestamp acknowledgement shape', async () => {
@@ -61,7 +72,7 @@ describe('durable queue admission', () => {
 
   test('rejects an unvalidated success envelope', async () => {
     nextResponse = () => Response.json({ data: { admittedSeq: 1, id: 'wrong', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } });
-    expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
+    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
   });
 
   test('does not classify an HTTP 400 as unsupported without a capability error', async () => {
@@ -78,6 +89,26 @@ describe('durable queue admission', () => {
     expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
   });
 
+  test('treats an HTML success and route 404 as unsupported', async () => {
+    nextResponse = () => new Response('<html>OpenCode</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
+
+    clearQueueAdmissionCapabilityCache();
+    nextResponse = () => new Response('route not found', { status: 404 });
+    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
+  });
+
+  test('treats a tagged missing session and conflict as failed, never ambiguous', async () => {
+    nextResponse = () => new Response(JSON.stringify({ name: 'SessionNotFoundError', message: 'session not found' }), {
+      status: 404, headers: { 'content-type': 'application/json' },
+    });
+    expect((await admitToDurableQueue(input)).outcome).toBe('failed');
+
+    clearQueueAdmissionCapabilityCache();
+    nextResponse = () => new Response('ConflictError: already admitted', { status: 409 });
+    expect((await admitToDurableQueue(input)).outcome).toBe('failed');
+  });
+
   test('treats potentially committed HTTP failures as ambiguous', async () => {
     for (const status of [408, 429, 500, 502, 503, 504]) {
       clearQueueAdmissionCapabilityCache();
@@ -90,6 +121,16 @@ describe('durable queue admission', () => {
 
   test('preserves attachments in the v2 prompt shape', () => {
     expect(buildQueueAdmissionPayload({ ...input, files: [{ id: 'f', file: new File([], 'x.png'), dataUrl: 'data:image/png;base64,x', mimeType: 'image/png', filename: 'x.png', size: 1, source: 'local' }] }).prompt.files).toEqual([{ uri: 'data:image/png;base64,x', name: 'x.png' }]);
+  });
+
+  test('omits unsupported structured context from the durable prompt', () => {
+    const context = createContextPart({
+      kind: 'code-comment', source: 'diff', fileLabel: 'src/app.ts', startLine: 3, endLine: 5,
+      language: 'ts', code: 'const x = 1;', text: 'fix this',
+    });
+    const payload = buildQueueAdmissionPayload({ ...input, contextParts: [context] });
+    expect((payload.prompt as Record<string, unknown>).parts).toEqual(undefined);
+    expect(payload.prompt.text).toBe('hello');
   });
 
   test('admits normalized HEIC and text files using uri/name only', async () => {

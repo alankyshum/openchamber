@@ -179,6 +179,20 @@ export async function proxySessionMessageRequest(options: {
   });
 }
 
+export async function proxySessionPromptRequest(options: {
+  path: string;
+  headers?: Record<string, string>;
+  bodyBase64?: string;
+  signal?: AbortSignal;
+}): Promise<ProxiedApiResponse> {
+  const { signal, ...payload } = options;
+  return sendBridgeMessageWithOptions<ProxiedApiResponse>('api:session:prompt', payload, {
+    timeoutMs: 0,
+    signal,
+    onAbort: (requestID) => getVSCodeAPI().postMessage({ id: `abort_${requestID}`, type: 'api:proxy:abort', payload: { requestID } }),
+  });
+}
+
 export type ProxiedSseStartResponse = {
   status: number;
   headers: Record<string, string>;

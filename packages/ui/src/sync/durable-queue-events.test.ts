@@ -93,8 +93,8 @@ describe('durable queue event reconciliation', () => {
     applyDurableQueueEvent(target, admitted('msg_race', 21, 'recover me'))
     const item = useMessageQueueStore.getState().getQueueForTarget(target).find((message) => message.id === queuedId)
     expect(item?.admissionState).toBe('admitted')
-    expect(item?.attachments).toEqual([attachment])
-    expect(item?.sendConfig).toEqual({ providerID: 'provider', modelID: 'model' })
+    expect(item?.attachments).toBe(undefined)
+    expect(item?.sendConfig).toBe(undefined)
     expect(useMessageQueueStore.getState().getSendableQueue(target)).toHaveLength(0)
   })
 
@@ -211,7 +211,7 @@ describe('durable queue event reconciliation', () => {
 
     await replayDurableQueueHistory(target)
 
-    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '7' })
+    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
     expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '8' })
     expect(useMessageQueueStore.getState().getQueueForTarget(target).map((item) => item.clientMessageId)).toEqual([
       'msg_old', 'msg_new', 'msg_last',

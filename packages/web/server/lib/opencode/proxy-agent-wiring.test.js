@@ -79,6 +79,16 @@ describe('OpenCode API proxy agent wiring', () => {
     }
   });
 
+  it('registers the durable prompt proxy with the upstream /api prefix', () => {
+    registerOpenCodeProxy(createStubApp(), createStubDeps(managedState()));
+
+    const promptProxy = createProxyMiddlewareMock.mock.calls
+      .map(([options]) => options)
+      .find((options) => typeof options.pathRewrite === 'function');
+    expect(promptProxy).toBeTruthy();
+    expect(promptProxy.pathRewrite('/session/ses-1/prompt', { originalUrl: '/api/session/ses-1/prompt' })).toBe('/api/session/ses-1/prompt');
+  });
+
   it('shares one agent instance across the API and OAuth proxies', () => {
     registerOpenCodeProxy(createStubApp(), createStubDeps(managedState()));
 

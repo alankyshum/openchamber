@@ -21,6 +21,7 @@ const inFlight = new Map<string, Promise<void>>()
 const replayControllers = new Map<string, AbortController>()
 type ReplayGeneration = { invalidated: boolean; complete: boolean }
 const replayGenerations = new Map<string, ReplayGeneration>()
+const initializedHistory = new Set<string>()
 const MAX_CURSOR_ENTRIES = 100
 const MAX_IN_FLIGHT_REPLAYS = 100
 const MAX_REPLAY_GENERATIONS = 100
@@ -96,7 +97,6 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
   const key = queueKey(target)
   const previous = inFlight.get(key)
   if (previous) return previous
-  if (replayGenerations.get(key)?.invalidated) return
   if (signal?.aborted) return
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
@@ -106,13 +106,18 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
   replayControllers.set(key, controller)
   replayGenerations.set(key, generation)
   const task = (async () => {
-    let after = cursors.get(key) ?? 0
+    // The first replay always asks for sequence zero. Live events observed
+    // while it is in flight must not move that starting point.
+    const initialReplay = !initializedHistory.has(key)
+    let after = initialReplay ? 0 : cursors.get(key) ?? 0
     let hasMore = true
     for (let page = 0; hasMore && page < 100; page += 1) {
       if (controller.signal.aborted) return
       const pageAfter = after
       const response = await runtimeFetch(`/api/session/${encodeURIComponent(target.sessionId)}/history`, {
-        method: 'GET', query: { directory: target.directory, after: String(pageAfter) }, signal: controller.signal,
+        method: 'GET', query: initialReplay && page === 0
+          ? { directory: target.directory }
+          : { directory: target.directory, after: String(pageAfter) }, signal: controller.signal,
       })
       if (replayGenerations.get(key) !== generation || generation.invalidated || controller.signal.aborted) return
       if (!response.ok) return
@@ -136,6 +141,7 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
     signal?.removeEventListener('abort', abort)
     generation.complete = true
     if (replayGenerations.get(key) === generation) {
+      if (!generation.invalidated) initializedHistory.add(key)
       inFlight.delete(key)
       replayControllers.delete(key)
       replayGenerations.delete(key)
@@ -163,6 +169,7 @@ export const durableQueueTarget = (sessionId: string, directory: string | null, 
 export const resetDurableQueueCursors = (): void => {
   for (const controller of replayControllers.values()) controller.abort()
   cursors.clear()
+  initializedHistory.clear()
   inFlight.clear()
   replayControllers.clear()
   replayGenerations.clear()
@@ -181,6 +188,7 @@ export const invalidateDurableQueueTarget = (target: MessageQueueTarget): void =
   inFlight.delete(key)
   replayControllers.delete(key)
   cursors.delete(key)
+  initializedHistory.delete(key)
   pruneReplayGenerations()
 }
 

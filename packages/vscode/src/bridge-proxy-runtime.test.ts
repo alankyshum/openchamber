@@ -30,6 +30,30 @@ const ctx = {
 } as unknown as BridgeContext;
 
 describe('VS Code API proxy aborts', () => {
+  test('forwards durable prompt requests to the upstream /api route', async () => {
+    const originalFetch = globalThis.fetch;
+    let upstreamUrl = '';
+    try {
+      globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+        upstreamUrl = String(input);
+        return Response.json({ ok: true });
+      }) as typeof fetch;
+
+      const response = await handleProxyBridgeMessage(
+        { id: 'prompt_1', type: 'api:session:prompt', payload: {
+          path: '/api/session/ses-1/prompt', bodyBase64: Buffer.from('{"id":"msg-1"}').toString('base64'),
+        } },
+        ctx,
+        deps,
+      );
+
+      assert.equal(new URL(upstreamUrl).pathname, '/api/session/ses-1/prompt');
+      assert.equal(response?.success, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('aborts non-SSE api:proxy fetches by bridge request id', async () => {
     const originalFetch = globalThis.fetch;
     let capturedSignal: AbortSignal | undefined;

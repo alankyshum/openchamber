@@ -1,11 +1,12 @@
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { isAmbiguousTransportFailure, markAmbiguousTransportFailure } from '@/lib/relay/transport-error';
+import type { ContextPart } from '@/lib/messages/contextParts';
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 
 export type QueueAdmissionInput = {
   runtimeKey: string; sessionId: string; directory: string; text: string;
-  files?: AttachedFile[]; agentMentionName?: string; clientMessageId: string;
+  files?: AttachedFile[]; contextParts?: ContextPart[]; agentMentionName?: string; clientMessageId: string;
 };
 export type QueueAdmissionResult =
   | { outcome: 'admitted'; acknowledgement: SessionInputAdmitted }
@@ -84,7 +85,11 @@ export const buildQueueAdmissionPayload = (input: QueueAdmissionInput) => {
   const files = (input.files ?? []).map((file) => ({ uri: file.dataUrl, name: file.filename }));
   return {
     id: input.clientMessageId,
-    prompt: { text: input.text, ...(files.length ? { files } : {}), ...(input.agentMentionName ? { agents: [{ name: input.agentMentionName }] } : {}) },
+    prompt: {
+      text: input.text,
+      ...(files.length ? { files } : {}),
+      ...(input.agentMentionName ? { agents: [{ name: input.agentMentionName }] } : {}),
+    },
     delivery: 'queue' as const,
   };
 };
@@ -96,6 +101,12 @@ export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<Q
   const requestGeneration = runtimeGeneration;
   if (input.runtimeKey !== getRuntimeKey()) {
     return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
+  }
+  // OpenCode 1.18.x accepts no durable representation for OpenChamber's
+  // structured context. Keep this message local so the normal prompt_async
+  // path can send the parts with the rest of the turn.
+  if (input.contextParts?.length) {
+    return { outcome: 'unsupported', error: new Error('Durable queue does not support structured context') };
   }
   const unsupportedAt = unsupportedRuntimes.get(input.runtimeKey);
   if (unsupportedAt !== undefined) {
@@ -109,7 +120,9 @@ export async function admitToDurableQueue(input: QueueAdmissionInput): Promise<Q
   if (existing) return existing;
   const request = admitToDurableQueueOnce(input, requestGeneration);
   inFlightAdmissions.set(key, request);
-  request.finally(() => inFlightAdmissions.delete(key)).catch(() => undefined);
+  request.finally(() => {
+    if (inFlightAdmissions.get(key) === request) inFlightAdmissions.delete(key);
+  }).catch(() => undefined);
   return request;
 }
 
@@ -153,26 +166,33 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
       if (requestGeneration !== runtimeGeneration || input.runtimeKey !== getRuntimeKey()) {
         return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
       }
+      const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+      if (!contentType.includes('application/json')) {
+        unsupportedRuntimes.set(input.runtimeKey, Date.now());
+        return { outcome: 'unsupported', error: new Error('Durable queue returned a non-JSON response') };
+      }
       const acknowledgement = parseAdmissionAck(await readResponseBody(() => response.json(), controller?.signal ?? null).catch(() => null), input);
       if (!acknowledgement) {
-        return {
-          outcome: 'ambiguous',
-          error: markAmbiguousTransportFailure(new Error('Durable queue returned an invalid acknowledgement')),
-        };
+        unsupportedRuntimes.set(input.runtimeKey, Date.now());
+        return { outcome: 'unsupported', error: new Error('Durable queue returned an invalid acknowledgement') };
       }
       return { outcome: 'admitted', acknowledgement };
     }
 
     const detail = await readResponseBody(() => response.text(), controller?.signal ?? null).catch(() => '');
     const error = new Error(`Durable queue admission failed (${response.status})${detail ? `: ${detail}` : ''}`);
-    if (response.status === 405) {
+    if (response.status === 405 || response.status === 501 || (response.status === 400 && /(?:old|legacy|unsupported).*schema|schema.*(?:old|legacy|unsupported)/i.test(detail))) {
       unsupportedRuntimes.set(input.runtimeKey, Date.now());
       return { outcome: 'unsupported', error };
     }
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
     }
-    if ([400, 401, 403, 404, 422].includes(response.status)) {
+    if (response.status === 404 && !/session.*not.?found|sessionnotfound/i.test(detail)) {
+      unsupportedRuntimes.set(input.runtimeKey, Date.now());
+      return { outcome: 'unsupported', error };
+    }
+    if (response.status === 409 || [400, 401, 403, 404, 422].includes(response.status)) {
       return { outcome: 'failed', error };
     }
     return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
