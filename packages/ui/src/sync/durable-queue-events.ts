@@ -83,7 +83,7 @@ export const applyDurableQueueEvent = (target: MessageQueueTarget, event: Durabl
     envelope.aggregateSequence, envelope.aggregateSeq, envelope.sequence, envelope.seq,
   )
   if (durableType === 'session.next.prompt.admitted' && admission && delivery === 'queue') {
-    useMessageQueueStore.getState().upsertDurableAdmission(target, { ...admission, admittedSeq: admission.admittedSeq ?? sequence, durableSeq: sequence })
+    useMessageQueueStore.getState().upsertDurableAdmission(target, { ...admission, durableSeq: sequence })
   } else if (durableType === 'session.next.prompted' && admission && delivery === 'queue') {
     useMessageQueueStore.getState().removeDurableAdmission(target, admission.id, sequence)
   }

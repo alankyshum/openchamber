@@ -188,37 +188,37 @@ describe('durable queue event reconciliation', () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(otherDirectoryTarget).map((item) => item.clientMessageId)).toEqual(['msg_other'])
   })
 
-  test('keeps the current cursor when updating the oldest entry at capacity', () => {
+  test('evicts another cursor when updating the oldest entry at capacity', async () => {
     const targets = Array.from({ length: 100 }, (_, index) => createMessageQueueTarget(`ses-${index}`, '/repo', 'runtime-a')!)
     responses = [Response.json({ data: [], hasMore: false })]
-    return replayDurableQueueHistory(targets[0]!).then(async () => {
-      for (const [index, cursorTarget] of targets.slice(1).entries()) {
-        applyDurableQueueEvent(cursorTarget, admitted(`msg-${index}`, index + 2, `${index}`))
-      }
-      applyDurableQueueEvent(targets[0]!, admitted('msg-oldest', 101, 'updated'))
+    await replayDurableQueueHistory(targets[0]!)
+    for (const [index, cursorTarget] of targets.slice(1).entries()) {
+      applyDurableQueueEvent(cursorTarget, admitted(`msg-${index}`, index + 2, `${index}`))
+    }
+    applyDurableQueueEvent(targets[0]!, admitted('msg-oldest', 101, 'updated'))
 
-      responses = [Response.json({ data: [], hasMore: false })]
-      await replayDurableQueueHistory(targets[0]!)
-      expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '101' })
-    })
+    const nextTarget = createMessageQueueTarget('ses-next', '/repo', 'runtime-a')!
+    applyDurableQueueEvent(nextTarget, admitted('msg-next', 102, 'next'))
+    responses = [Response.json({ data: [], hasMore: false })]
+    await replayDurableQueueHistory(targets[1]!)
+    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
   })
 
-  test('caps cursors when the oldest current entry is updated at capacity', async () => {
-    const targets = Array.from({ length: 100 }, (_, index) => createMessageQueueTarget(`ses-cap-${index}`, '/repo', 'runtime-a')!)
-    responses = [Response.json({ data: [], hasMore: false })]
-    await replayDurableQueueHistory(targets[0]!)
+  test('preserves richer admission metadata when a durable update omits it', () => {
+    applyDurableQueueEvent(target, {
+      ...admitted('msg-metadata', 10, 'original'),
+      data: { ...admitted('msg-metadata', 10, 'original').data, admittedSeq: 10 },
+    })
+    applyDurableQueueEvent(target, {
+      type: 'session.next.prompt.admitted.1',
+      data: { messageID: 'msg-metadata', sessionID: 'ses-1', delivery: 'queue' },
+      durable: { seq: 11 },
+    })
 
-    for (const [index, cursorTarget] of targets.slice(1).entries()) {
-      applyDurableQueueEvent(cursorTarget, admitted(`msg-cap-${index}`, index + 1, `${index}`))
-    }
-
-    applyDurableQueueEvent(targets[0]!, admitted('msg-cap-0', 101, 'updated'))
-    const nextTarget = createMessageQueueTarget('ses-cap-next', '/repo', 'runtime-a')!
-    applyDurableQueueEvent(nextTarget, admitted('msg-cap-next', 102, 'next'))
-
-    responses = [Response.json({ data: [], hasMore: false })]
-    await replayDurableQueueHistory(targets[0]!)
-    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '101' })
+    const item = useMessageQueueStore.getState().getQueueForTarget(target)[0]
+    expect(item?.content).toBe('original')
+    expect(item?.admissionAck?.admittedSeq).toBe(10)
+    expect(item?.admissionAck?.timeCreated).toBeDefined()
   })
 
   test('replaces a raced local item without changing its FIFO index', () => {

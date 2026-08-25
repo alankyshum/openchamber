@@ -530,16 +530,18 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             clientMessageId: admission.id,
                             admissionState: 'admitted',
                             admissionAck: {
-                                admittedSeq: admission.admittedSeq ?? 0,
-                                timeCreated: admission.timeCreated ?? Date.now(),
+                                ...(existing?.admissionAck ?? {}),
+                                admittedSeq: admission.admittedSeq ?? existing?.admissionAck?.admittedSeq ?? 0,
+                                timeCreated: admission.timeCreated ?? existing?.admissionAck?.timeCreated ?? Date.now(),
                             },
                              // Keep local payload fields that raced the authoritative
                              // event until normal queue capping removes them.
                             attachments: existing?.attachments,
                             sendConfig: existing?.sendConfig,
                             durableSeq: admission.durableSeq,
-                            remoteAttachmentNames: admission.prompt?.files?.map((file) => file.name).filter((name): name is string => Boolean(name)),
-                            remoteAttachmentCount: admission.prompt?.files?.length,
+                            remoteAttachmentNames: admission.prompt ? admission.prompt.files?.map((file) => file.name).filter((name): name is string => Boolean(name)) : existing?.remoteAttachmentNames,
+                            remoteAttachmentCount: admission.prompt ? admission.prompt.files?.length : existing?.remoteAttachmentCount,
+                            contextParts: admission.prompt?.parts ?? existing?.contextParts,
                         };
                         const existingIndex = current.findIndex((message) => message.clientMessageId === admission.id);
                         const updated = existingIndex < 0

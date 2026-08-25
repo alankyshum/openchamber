@@ -867,10 +867,16 @@ const normalizeEventDirectory = (rawDirectory: string): string => {
   return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized
 }
 
-const getSessionIdFromPayload = (event: Event): string | null => {
+const isDurableQueueEventType = (type: unknown): boolean =>
+  type === "session.next.prompt.admitted"
+  || type === "session.next.prompt.admitted.1"
+  || type === "session.next.prompted"
+  || type === "session.next.prompted.1"
+
+export const getSessionIdFromPayload = (event: Event): string | null => {
   const properties = (event as { properties?: unknown }).properties
   const data = (event as unknown as { data?: unknown }).data
-  if (data && typeof data === "object" && !Array.isArray(data)) {
+  if (isDurableQueueEventType(event.type) && data && typeof data === "object" && !Array.isArray(data)) {
     const sessionID = (data as { sessionID?: unknown }).sessionID
     if (typeof sessionID === "string" && sessionID.length > 0) return sessionID
   }
