@@ -180,6 +180,28 @@ describe('context drafts', () => {
 });
 
 describe('synthetic context', () => {
+    test('does not duplicate structured parts when the production input shape is used', () => {
+        const part = { text: 'context', synthetic: true as const, metadata: { openchamberContext: {
+            kind: 'chat-quote' as const, quote: 'quoted', text: 'note', messageId: 'msg-1',
+        } } };
+        const result = buildOutgoingMessage(input({
+            composerText: 'body',
+            syntheticTexts: [part.text],
+            syntheticParts: [part],
+        }), deps());
+
+        expect(result.additionalParts).toEqual([part]);
+    });
+
+    test('keeps legacy synthetic text callers working', () => {
+        const result = buildOutgoingMessage(input({
+            composerText: 'body',
+            syntheticTexts: ['conflict note'],
+        }), deps());
+
+        expect(result.additionalParts).toEqual([{ text: 'conflict note', synthetic: true }]);
+    });
+
     test('preserves metadata on structured synthetic parts', () => {
         const part = { text: 'context', synthetic: true as const, metadata: { openchamberContext: {
             kind: 'chat-quote' as const, quote: 'quoted', text: 'note', messageId: 'msg-1',

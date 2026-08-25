@@ -146,12 +146,14 @@ export function buildOutgoingMessage(
         additionalParts.push(createContextPart(contextPayloadFromDraft(draft)));
     }
 
-    for (const text of input.syntheticTexts) {
-        additionalParts.push({ text, synthetic: true });
-    }
-
     if (input.syntheticParts) {
         additionalParts.push(...input.syntheticParts);
+    } else {
+        // Keep the text-only channel for legacy callers, but do not create a
+        // second, metadata-free copy when structured parts are provided.
+        for (const text of input.syntheticTexts) {
+            additionalParts.push({ text, synthetic: true });
+        }
     }
 
     if (input.linkedIssue) {

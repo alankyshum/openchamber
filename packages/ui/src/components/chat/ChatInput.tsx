@@ -1257,11 +1257,13 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             composerText: !queuedOnly && inputSnapshot.hasContent ? inputSnapshot.message : null,
             composerAttachments: attachedFiles,
             inlineComments: drafts,
-            syntheticTexts: [
-                ...buildBtwSyntheticTexts({ isBtwActive, isPromotedBtwSession }),
-                ...(syntheticParts?.map((part) => part.text) ?? []),
+            // Structured parts already carry their text. Keep the legacy text
+            // channel empty here so each context item is sent once.
+            syntheticTexts: [],
+            syntheticParts: [
+                ...buildBtwSyntheticTexts({ isBtwActive, isPromotedBtwSession }).map((text) => ({ text, synthetic: true })),
+                ...(syntheticParts ?? []),
             ],
-            syntheticParts: syntheticParts ?? undefined,
             linkedIssue: linkedIssue
                 ? { number: linkedIssue.number, title: linkedIssue.title, url: linkedIssue.url, contextText: linkedIssue.contextText }
                 : null,
