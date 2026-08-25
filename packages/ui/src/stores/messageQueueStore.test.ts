@@ -247,4 +247,17 @@ describe("in-flight queued sends", () => {
     expect(queue.find((message) => message.id === a)?.attachments).toEqual([attachment])
     expect(queue.find((message) => message.id === a)?.sendConfig).toEqual({ providerID: 'p', modelID: 'm' })
   })
+
+  test("marking admission on a missing target does not create an empty queue", () => {
+    const target = createMessageQueueTarget("missing", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+
+    store.markAdmissionPending(target, "missing-message", "missing-client")
+    store.markAdmissionLocal(target, "missing-message")
+    store.markAdmissionAdmitted(target, "missing-message", { admittedSeq: 1, timeCreated: 1 })
+    store.markAdmissionFailed(target, "missing-message")
+    store.markAdmissionUnknown(target, "missing-message")
+
+    expect(useMessageQueueStore.getState().queuedMessages).toEqual({})
+  })
 })

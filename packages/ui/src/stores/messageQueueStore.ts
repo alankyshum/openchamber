@@ -442,23 +442,33 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
                 markAdmissionPending: (target, messageId, clientMessageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'pending-admission' as const, clientMessageId } : message)) } }));
+                    set((state) => {
+                        const current = state.queuedMessages[key];
+                        if (!current) return state;
+                        return { queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages(current.map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'pending-admission' as const, clientMessageId } : message)) } };
+                    });
                 },
                 markAdmissionLocal: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({
+                    set((state) => {
+                        const current = state.queuedMessages[key];
+                        if (!current) return state;
+                        return {
                             queuedMessages: {
                                 ...state.queuedMessages,
-                                [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted'
+                                [key]: capQueueMessages(current.map((message) => message.id === messageId && message.admissionState !== 'admitted'
                                     ? { ...message, admissionState: 'local' as const }
                                     : message)),
                             },
-                    }));
+                        };
+                    });
                 },
                 markAdmissionAdmitted: (target, messageId, admissionAck) => {
                     const key = getMessageQueueKey(target);
                     set((state) => {
-                        const updated = (state.queuedMessages[key] ?? []).map((message) => message.id === messageId
+                        const current = state.queuedMessages[key];
+                        if (!current) return state;
+                        const updated = current.map((message) => message.id === messageId
                             && message.durableSeq === undefined
                             && (message.admissionAck?.admittedSeq ?? -1) <= (admissionAck?.admittedSeq ?? -1)
                             ? { ...message, admissionState: 'admitted' as const, admissionAck, durableSeq: admissionAck?.admittedSeq, attachments: undefined, sendConfig: undefined }
@@ -481,11 +491,19 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
                 markAdmissionFailed: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-failed' as const } : message)) } }));
+                    set((state) => {
+                        const current = state.queuedMessages[key];
+                        if (!current) return state;
+                        return { queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages(current.map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-failed' as const } : message)) } };
+                    });
                 },
                 markAdmissionUnknown: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages((state.queuedMessages[key] ?? []).map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-unknown' as const, sendConfig: undefined } : message)) } }));
+                    set((state) => {
+                        const current = state.queuedMessages[key];
+                        if (!current) return state;
+                        return { queuedMessages: { ...state.queuedMessages, [key]: capQueueMessages(current.map((message) => message.id === messageId && message.admissionState !== 'admitted' ? { ...message, admissionState: 'admission-unknown' as const, sendConfig: undefined } : message)) } };
+                    });
                 },
                 recoverAdmissionToInput: (target, messageId) => {
                     const key = getMessageQueueKey(target);
