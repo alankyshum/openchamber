@@ -280,13 +280,14 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         };
                         const keys = Object.keys(queuedMessages);
                         if (keys.length > MAX_QUEUE_TARGETS) {
-                            keys.sort((left, right) => {
+                            const evictionCandidates = keys.filter((candidate) => candidate !== key);
+                            evictionCandidates.sort((left, right) => {
                                 const leftHasLocal = queuedMessages[left]?.some((item) => (item.admissionState ?? 'local') === 'local') ?? false;
                                 const rightHasLocal = queuedMessages[right]?.some((item) => (item.admissionState ?? 'local') === 'local') ?? false;
                                 if (leftHasLocal !== rightHasLocal) return leftHasLocal ? 1 : -1;
                                 return (queuedMessages[left]?.[0]?.createdAt ?? 0) - (queuedMessages[right]?.[0]?.createdAt ?? 0);
                             });
-                            for (const staleKey of keys.slice(0, keys.length - MAX_QUEUE_TARGETS)) delete queuedMessages[staleKey];
+                            for (const staleKey of evictionCandidates.slice(0, keys.length - MAX_QUEUE_TARGETS)) delete queuedMessages[staleKey];
                         }
                         return {
                             queuedMessages,
@@ -490,18 +491,29 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     const key = getMessageQueueKey(target);
                     const message = get().queuedMessages[key]?.find((item) => item.id === messageId);
                     if (!message || (message.admissionState !== 'admission-failed' && message.admissionState !== 'admission-unknown')) return null;
-                    set((state) => ({ queuedMessages: { ...state.queuedMessages, [key]: (state.queuedMessages[key] ?? []).filter((item) => item.id !== messageId) } }));
+                    set((state) => {
+                        const remaining = (state.queuedMessages[key] ?? []).filter((item) => item.id !== messageId);
+                        if (remaining.length === 0) {
+                            const { [key]: _removed, ...rest } = state.queuedMessages;
+                            void _removed;
+                            return { queuedMessages: rest };
+                        }
+                        return { queuedMessages: { ...state.queuedMessages, [key]: remaining } };
+                    });
                     return message;
                 },
                 dismissAdmissionUnknown: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    set((state) => ({
-                        queuedMessages: {
-                            ...state.queuedMessages,
-                            [key]: (state.queuedMessages[key] ?? []).filter((item) =>
-                                item.id !== messageId || item.admissionState !== 'admission-unknown'),
-                        },
-                    }));
+                    set((state) => {
+                        const remaining = (state.queuedMessages[key] ?? []).filter((item) =>
+                            item.id !== messageId || item.admissionState !== 'admission-unknown');
+                        if (remaining.length === 0) {
+                            const { [key]: _removed, ...rest } = state.queuedMessages;
+                            void _removed;
+                            return { queuedMessages: rest };
+                        }
+                        return { queuedMessages: { ...state.queuedMessages, [key]: remaining } };
+                    });
                 },
                 upsertDurableAdmission: (target, admission) => {
                     const key = getMessageQueueKey(target);
@@ -545,11 +557,14 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             if (promptedSeq !== undefined && promptedSeq < admissionSeq) return [message];
                             return [];
                         });
+                        const previousTombstones = state.durableTombstones[key] ?? {};
+                        const { [clientMessageId]: _refreshed, ...olderTombstones } = previousTombstones;
+                        void _refreshed;
                         const tombstoneEntries = Object.entries({
-                            ...(state.durableTombstones[key] ?? {}),
+                            ...olderTombstones,
                             [clientMessageId]: Math.max(
                                 promptedSeq ?? Number.MAX_SAFE_INTEGER,
-                                state.durableTombstones[key]?.[clientMessageId] ?? 0,
+                                previousTombstones[clientMessageId] ?? 0,
                             ),
                         });
                         const tombstones = Object.fromEntries(tombstoneEntries.slice(-MAX_ADMITTED_HISTORY));

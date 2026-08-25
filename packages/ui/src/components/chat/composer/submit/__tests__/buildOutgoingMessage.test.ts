@@ -202,6 +202,16 @@ describe('synthetic context', () => {
         expect(result.additionalParts).toEqual([{ text: 'conflict note', synthetic: true }]);
     });
 
+    test('keeps legacy synthetic texts when structured parts are empty', () => {
+        const result = buildOutgoingMessage(input({
+            composerText: 'body',
+            syntheticTexts: ['legacy context'],
+            syntheticParts: [],
+        }), deps());
+
+        expect(result.additionalParts).toEqual([{ text: 'legacy context', synthetic: true }]);
+    });
+
     test('preserves metadata on structured synthetic parts', () => {
         const part = { text: 'context', synthetic: true as const, metadata: { openchamberContext: {
             kind: 'chat-quote' as const, quote: 'quoted', text: 'note', messageId: 'msg-1',

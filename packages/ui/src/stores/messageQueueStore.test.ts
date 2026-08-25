@@ -49,6 +49,17 @@ describe("message queue runtime ownership", () => {
     expect(queue).toHaveLength(20)
     expect(queue[0]?.content).toBe("message-5")
   })
+
+  test("keeps a fresh pending target when the 51-target cap evicts an older target", () => {
+    const targets = Array.from({ length: 50 }, (_, index) => createMessageQueueTarget(`session-${index}`, "/repo", "runtime-a")!)
+    for (const target of targets) useMessageQueueStore.getState().addToQueue(target, { content: target.sessionId })
+    const fresh = createMessageQueueTarget("fresh", "/repo", "runtime-a")!
+    const freshId = useMessageQueueStore.getState().addToQueue(fresh, { content: "keep", admissionState: "pending-admission" })
+
+    expect(useMessageQueueStore.getState().getQueueForTarget(fresh).map((message) => message.id)).toEqual([freshId])
+    expect(Object.keys(useMessageQueueStore.getState().queuedMessages)).toHaveLength(50)
+    expect(useMessageQueueStore.getState().getQueueForTarget(targets[0])).toEqual([])
+  })
 })
 
 describe("in-flight queued sends", () => {
@@ -131,6 +142,33 @@ describe("in-flight queued sends", () => {
     ])
     expect(hydrated.key?.find((message) => message.id === 'pending')?.attachments).toEqual([attachment])
     expect(hydrated.key?.find((message) => message.id === 'unknown')?.attachments).toEqual([attachment])
+  })
+
+  test("removes an empty queue after dismissing unknown admission", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    useMessageQueueStore.getState().addToQueue(target, { content: "unknown", admissionState: "admission-unknown" })
+    useMessageQueueStore.getState().dismissAdmissionUnknown(target, useMessageQueueStore.getState().getQueueForTarget(target)[0]!.id)
+    expect(useMessageQueueStore.getState().queuedMessages).toEqual({})
+  })
+
+  test("removes an empty queue after recovering unknown admission", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    useMessageQueueStore.getState().addToQueue(target, { content: "failed", admissionState: "admission-failed" })
+    const id = useMessageQueueStore.getState().getQueueForTarget(target)[0]!.id
+    expect(useMessageQueueStore.getState().recoverAdmissionToInput(target, id)?.content).toBe("failed")
+    expect(useMessageQueueStore.getState().queuedMessages).toEqual({})
+  })
+
+  test("refreshing a tombstone makes it the newest capped entry", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    for (let index = 0; index < 20; index += 1) store.removeDurableAdmission(target, `message-${index}`, index)
+    store.removeDurableAdmission(target, "message-0", 100)
+    store.removeDurableAdmission(target, "message-new", 101)
+    const tombstones = useMessageQueueStore.getState().durableTombstones[Object.keys(useMessageQueueStore.getState().durableTombstones)[0]!]
+    expect(tombstones?.["message-0"]).toBe(100)
+    expect(Object.keys(tombstones ?? {})).toHaveLength(20)
+    expect(tombstones?.["message-1"]).toBe(undefined)
   })
 
   test("hydration strips attachment payloads from admitted history", () => {

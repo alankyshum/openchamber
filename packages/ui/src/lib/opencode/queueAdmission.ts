@@ -17,7 +17,7 @@ export type QueueAdmissionResult =
 const unsupportedRuntimes = new Map<string, number>();
 let runtimeGeneration = 0;
 const UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1000;
-export const ADMISSION_TIMEOUT_MS = 15_000;
+const ADMISSION_TIMEOUT_MS = 15_000;
 const inFlightAdmissions = new Map<string, Promise<QueueAdmissionResult>>();
 
 const readResponseBody = async <T>(
@@ -43,12 +43,12 @@ const readResponseBody = async <T>(
   });
 };
 
-export type SessionInputAdmitted = {
+type SessionInputAdmitted = {
   admittedSeq: number; id: string; sessionID: string;
   prompt: unknown; delivery: 'queue'; timeCreated: number; promotedSeq?: number;
 };
 
-export const parseAdmissionAck = (value: unknown, expected: QueueAdmissionInput): SessionInputAdmitted | null => {
+const parseAdmissionAck = (value: unknown, expected: QueueAdmissionInput): SessionInputAdmitted | null => {
   const data = (value as { data?: unknown } | null)?.data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const ack = data as Record<string, unknown>;

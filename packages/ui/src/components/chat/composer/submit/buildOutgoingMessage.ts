@@ -146,14 +146,13 @@ export function buildOutgoingMessage(
         additionalParts.push(createContextPart(contextPayloadFromDraft(draft)));
     }
 
-    if (input.syntheticParts) {
+    if (input.syntheticParts?.length) {
         additionalParts.push(...input.syntheticParts);
     } else {
-        // Keep the text-only channel for legacy callers, but do not create a
-        // second, metadata-free copy when structured parts are provided.
-        for (const text of input.syntheticTexts) {
-            additionalParts.push({ text, synthetic: true });
-        }
+        // Keep the text-only channel for legacy callers. An empty structured
+        // list means no structured parts were produced, not that legacy text
+        // should be discarded.
+        for (const text of input.syntheticTexts) additionalParts.push({ text, synthetic: true });
     }
 
     if (input.linkedIssue) {
