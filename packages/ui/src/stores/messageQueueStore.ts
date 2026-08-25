@@ -571,7 +571,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const durableTombstones = { ...state.durableTombstones, [key]: tombstones };
                         const tombstoneKeys = Object.keys(durableTombstones);
                         if (tombstoneKeys.length > MAX_QUEUE_TARGETS) {
-                            for (const staleKey of tombstoneKeys.slice(0, tombstoneKeys.length - MAX_QUEUE_TARGETS)) {
+                            const evictionCandidates = tombstoneKeys.filter((candidate) => candidate !== key);
+                            for (const staleKey of evictionCandidates.slice(0, tombstoneKeys.length - MAX_QUEUE_TARGETS)) {
                                 delete durableTombstones[staleKey];
                             }
                         }

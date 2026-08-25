@@ -171,6 +171,19 @@ describe("in-flight queued sends", () => {
     expect(tombstones?.["message-1"]).toBe(undefined)
   })
 
+  test("keeps the updated target when capping 51 durable tombstone targets", () => {
+    const targets = Array.from({ length: 51 }, (_, index) => createMessageQueueTarget(`session-${index}`, "/repo", "runtime-a")!)
+    const tombstones = Object.fromEntries(targets.map((target, index) => [getMessageQueueKey(target), { [`message-${index}`]: index }]))
+    useMessageQueueStore.setState({ durableTombstones: tombstones })
+
+    useMessageQueueStore.getState().removeDurableAdmission(targets[0]!, "message-current", 100)
+
+    const durableTombstones = useMessageQueueStore.getState().durableTombstones
+    expect(Object.keys(durableTombstones)).toHaveLength(50)
+    expect(durableTombstones[getMessageQueueKey(targets[0]!)]?.["message-current"]).toBe(100)
+    expect(durableTombstones[getMessageQueueKey(targets[1]!) ]).toBe(undefined)
+  })
+
   test("hydration strips attachment payloads from admitted history", () => {
     const attachment = { id: 'server-file', file: new File([], 'server.txt'), dataUrl: 'data:text/plain;base64,s', mimeType: 'text/plain', filename: 'server.txt', size: 1, source: 'local' as const }
     const hydrated = normalizePersistedQueueMessages({ key: [
