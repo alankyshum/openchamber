@@ -139,6 +139,7 @@ import {
     toServerFileUrl,
 } from './composer/attachments/filePaths';
 import { buildOutgoingMessage } from './composer/submit/buildOutgoingMessage';
+import { restoreComposerPayload } from './composer/submit/restoreComposerPayload';
 import { contextPayloadFromDraft, createContextPart } from '@/lib/messages/contextParts';
 import {
     buildCommandVariables,
@@ -790,6 +791,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         )
     );
     const consumeDrafts = useInlineCommentDraftStore((state) => state.consumeDrafts);
+    const clearInlineDrafts = useInlineCommentDraftStore((state) => state.clearDrafts);
     const hasDrafts = draftCount > 0;
 
     // User message history for up/down arrow navigation.
@@ -1065,18 +1067,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     }, [messageQueueTarget, markAdmissionPending, markAdmissionLocal, markAdmissionAdmitted, markAdmissionFailed, markAdmissionUnknown, agents]);
 
     const handleRestoreAdmission = React.useCallback((queuedMessage: QueuedMessage) => {
-        if (!messageQueueTarget) return;
+        if (!messageQueueTarget || !inlineDraftTarget) return;
         const restored = recoverAdmissionToInput(messageQueueTarget, queuedMessage.id);
         if (!restored) return;
-        setMessage(restored.content);
-        // Recovery is an explicit replacement of the uncertain queued draft.
-        // Do not merge it with files from a newer, unrelated live draft: that
-        // could send the wrong files or duplicate attachments. Clear files too
-        // when the recovered message was text-only.
-        useInputStore.getState().setAttachedFiles(restored.attachments ?? []);
-        useInputStore.getState().setPendingSyntheticParts(restored.contextParts ?? null);
+        restoreComposerPayload(inlineDraftTarget, restored, {
+            clearInlineDrafts,
+            setMessage,
+            setAttachedFiles: useInputStore.getState().setAttachedFiles,
+            setPendingSyntheticParts: useInputStore.getState().setPendingSyntheticParts,
+        });
         composerRef.current?.focus();
-    }, [messageQueueTarget, recoverAdmissionToInput]);
+    }, [clearInlineDrafts, inlineDraftTarget, messageQueueTarget, recoverAdmissionToInput]);
 
     const handleOpenAgentPanel = React.useCallback(() => {
         setMobileControlsPanel('agent');
