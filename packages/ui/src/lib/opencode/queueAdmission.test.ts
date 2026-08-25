@@ -72,7 +72,7 @@ describe('durable queue admission', () => {
 
   test('rejects an unvalidated success envelope', async () => {
     nextResponse = () => Response.json({ data: { admittedSeq: 1, id: 'wrong', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } });
-    expect((await admitToDurableQueue(input)).outcome).toBe('unsupported');
+    expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
   });
 
   test('does not classify an HTTP 400 as unsupported without a capability error', async () => {

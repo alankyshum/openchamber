@@ -173,8 +173,10 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
       }
       const acknowledgement = parseAdmissionAck(await readResponseBody(() => response.json(), controller?.signal ?? null).catch(() => null), input);
       if (!acknowledgement) {
-        unsupportedRuntimes.set(input.runtimeKey, Date.now());
-        return { outcome: 'unsupported', error: new Error('Durable queue returned an invalid acknowledgement') };
+        return {
+          outcome: 'ambiguous',
+          error: markAmbiguousTransportFailure(new Error('Durable queue returned an invalid acknowledgement')),
+        };
       }
       return { outcome: 'admitted', acknowledgement };
     }

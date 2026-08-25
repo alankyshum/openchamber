@@ -115,6 +115,18 @@ describe('durable queue event reconciliation', () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(target).map((item) => item.clientMessageId)).toEqual(['msg_live', 'msg_page'])
   })
 
+  test('starts the first history replay at sequence zero even when live arrives first', async () => {
+    let resolve!: (response: Response) => void
+    responses = [new Promise<Response>((r) => { resolve = r })]
+    const replay = replayDurableQueueHistory(target)
+    applyDurableQueueEvent(target, admitted('msg_live_zero', 4, 'live'))
+    resolve(Response.json({ data: [admitted('msg_zero', 0, 'zero')], hasMore: false }))
+    await replay
+
+    expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
+    expect(useMessageQueueStore.getState().getQueueForTarget(target).map((item) => item.clientMessageId)).toEqual(['msg_live_zero', 'msg_zero'])
+  })
+
   test('session deletion cancels an in-flight stale admission replay', async () => {
     let resolve!: (response: Response) => void
     responses = [new Promise<Response>((r) => { resolve = r })]
