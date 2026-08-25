@@ -1060,6 +1060,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // could send the wrong files or duplicate attachments. Clear files too
         // when the recovered message was text-only.
         useInputStore.getState().setAttachedFiles(restored.attachments ?? []);
+        useInputStore.getState().setPendingSyntheticParts(restored.contextParts ?? null);
         composerRef.current?.focus();
     }, [messageQueueTarget, recoverAdmissionToInput]);
 
@@ -1260,6 +1261,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 ...buildBtwSyntheticTexts({ isBtwActive, isPromotedBtwSession }),
                 ...(syntheticParts?.map((part) => part.text) ?? []),
             ],
+            syntheticParts: syntheticParts ?? undefined,
             linkedIssue: linkedIssue
                 ? { number: linkedIssue.number, title: linkedIssue.title, url: linkedIssue.url, contextText: linkedIssue.contextText }
                 : null,

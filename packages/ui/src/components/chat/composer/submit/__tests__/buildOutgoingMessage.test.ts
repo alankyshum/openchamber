@@ -180,6 +180,14 @@ describe('context drafts', () => {
 });
 
 describe('synthetic context', () => {
+    test('preserves metadata on structured synthetic parts', () => {
+        const part = { text: 'context', synthetic: true as const, metadata: { openchamberContext: {
+            kind: 'chat-quote' as const, quote: 'quoted', text: 'note', messageId: 'msg-1',
+        } } };
+        const result = buildOutgoingMessage(input({ composerText: 'body', syntheticParts: [part] }), deps());
+        expect(result.additionalParts).toEqual([part]);
+    });
+
     test('a linked PR sends its instructions before its diff', () => {
         const result = buildOutgoingMessage(input({
             composerText: 'review this',
