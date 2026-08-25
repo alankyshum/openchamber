@@ -294,6 +294,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     SSE_HEARTBEAT_INTERVAL_MS = DEFAULT_SSE_HEARTBEAT_INTERVAL_MS,
     SSE_UPSTREAM_STALL_TIMEOUT_MS = DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
+    DURABLE_PROXY_TIMEOUT_MS,
   } = deps;
 
   if (app.get('opencodeProxyConfigured')) {
@@ -415,6 +416,9 @@ export const registerOpenCodeProxy = (app, deps) => {
   };
 
   const PROXY_REQUEST_TIMEOUT_MS = normalizeProxyTimeout(LONG_REQUEST_TIMEOUT_MS);
+  const DURABLE_PROXY_REQUEST_TIMEOUT_MS = normalizeProxyTimeout(
+    DURABLE_PROXY_TIMEOUT_MS ?? PROXY_REQUEST_TIMEOUT_MS,
+  );
   const PROXY_TIMEOUT_MARKER = Symbol('openchamberProxyTimedOut');
 
   // A provider OAuth callback blocks upstream for as long as the user takes to
@@ -951,18 +955,19 @@ export const registerOpenCodeProxy = (app, deps) => {
       const originalUrl = typeof req.originalUrl === 'string' ? req.originalUrl : _path;
       return buildDurableV2ProxyPath(originalUrl);
     },
-    timeout: PROXY_REQUEST_TIMEOUT_MS,
-    proxyTimeout: PROXY_REQUEST_TIMEOUT_MS,
+    timeout: DURABLE_PROXY_REQUEST_TIMEOUT_MS,
+    proxyTimeout: DURABLE_PROXY_REQUEST_TIMEOUT_MS,
     router: () => resolveProxyTarget(),
     on: {
       proxyReq: (proxyReq, req) => {
         const authHeaders = getOpenCodeAuthHeaders();
         if (authHeaders.Authorization) proxyReq.setHeader('Authorization', authHeaders.Authorization);
+        const encodedDirectory = req.headers?.['x-opencode-directory-encoding'] === 'uri';
         normalizeForwardedDirectoryHeaders(req.headers);
         if (req.headers?.['x-opencode-directory']) {
           proxyReq.setHeader('x-opencode-directory', req.headers['x-opencode-directory']);
         }
-        proxyReq.removeHeader?.('x-opencode-directory-encoding');
+        if (encodedDirectory) proxyReq.removeHeader?.('x-opencode-directory-encoding');
         proxyReq.setHeader('accept-encoding', 'identity');
         replayParsedBody(proxyReq, req);
       },

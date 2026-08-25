@@ -266,16 +266,18 @@ describe('durable queue event reconciliation', () => {
     ])
   })
 
-  test('removes an admitted item when its prompted event reaches the admitted sequence', () => {
+  test('removes an admitted item when its prompted event passes the admitted sequence', () => {
     const id = useMessageQueueStore.getState().addToQueue(target, {
       content: 'ordered', admissionState: 'pending-admission', clientMessageId: 'msg-sequence-contract',
     })
     useMessageQueueStore.getState().markAdmissionAdmitted(target, id, { admittedSeq: 17, timeCreated: 1 })
 
+    // The upstream contract emits a prompted sequence after the admission
+    // sequence. This test exercises the boundary comparison, not that contract.
     applyDurableQueueEvent(target, {
       type: 'session.next.prompted.1',
       data: { messageID: 'msg-sequence-contract', sessionID: 'ses-1', delivery: 'queue' },
-      durable: { seq: 17 },
+      durable: { seq: 18 },
     })
 
     expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([])

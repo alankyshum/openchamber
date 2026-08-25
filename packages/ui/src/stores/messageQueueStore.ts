@@ -479,18 +479,10 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             && (message.admissionAck?.admittedSeq ?? -1) <= (admissionAck?.admittedSeq ?? -1)
                             ? { ...message, admissionState: 'admitted' as const, admissionAck, durableSeq: admissionAck?.admittedSeq, attachments: undefined, sendConfig: undefined }
                             : message);
-                        const recoverable = updated.filter((message) => message.admissionState !== 'admitted');
-                        const pending = recoverable.filter((message) => message.admissionState === 'pending-admission');
-                        const actionable = recoverable.filter((message) => message.admissionState !== 'pending-admission');
-                        const admitted = updated.filter((message) => message.admissionState === 'admitted');
                         return {
                             queuedMessages: {
                                 ...state.queuedMessages,
-                                [key]: capQueueMessages([
-                                    ...actionable.slice(-MAX_MESSAGES_PER_QUEUE),
-                                    ...pending.slice(-MAX_PENDING_ADMISSIONS),
-                                    ...admitted.slice(-MAX_ADMITTED_HISTORY),
-                                ]),
+                                [key]: capQueueMessages(updated),
                             },
                         };
                     });

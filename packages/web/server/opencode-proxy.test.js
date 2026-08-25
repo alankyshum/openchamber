@@ -422,6 +422,75 @@ describe('OpenCode proxy SSE forwarding', () => {
     expect(seen).toEqual({ directory: '/Users/example/project with spaces', encoding: undefined });
   });
 
+  it('forwards durable prompts with their body and preserves non-uri directory hints', async () => {
+    let seen;
+    const upstream = express();
+    upstream.post('/api/session/abc/prompt', express.json(), (req, res) => {
+      seen = {
+        body: req.body,
+        directory: req.headers['x-opencode-directory'],
+        encoding: req.headers['x-opencode-directory-encoding'],
+      };
+      res.json({ ok: true });
+    });
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+    const app = express();
+    app.use(express.json());
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
+      getRuntime: () => ({ openCodePort: upstreamPort, openCodeBaseUrl: externalBaseUrl, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/prompt`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-opencode-directory': '/encoded/project',
+        'x-opencode-directory-encoding': 'base64',
+      },
+      body: JSON.stringify({ parts: [{ type: 'text', text: 'hello' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(seen).toEqual({
+      body: { parts: [{ type: 'text', text: 'hello' }] },
+      directory: '/encoded/project',
+      encoding: 'base64',
+    });
+  });
+
+  it('maps a durable proxy timeout independently of the shared request deadline', async () => {
+    const upstream = express();
+    upstream.get('/api/session/abc/history', () => {});
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
+      LONG_REQUEST_TIMEOUT_MS: 200,
+      DURABLE_PROXY_TIMEOUT_MS: 30,
+      getRuntime: () => ({ openCodePort: upstreamPort, openCodeBaseUrl: externalBaseUrl, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/history`, {
+      signal: AbortSignal.timeout(2000),
+    });
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toEqual({ error: 'OpenCode upstream timed out' });
+  });
+
   it('sanitizes experimental session list responses and forwards query params', async () => {
     let seenQuery = null;
     let seenAuth = null;
