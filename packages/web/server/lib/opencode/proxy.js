@@ -294,7 +294,6 @@ export const registerOpenCodeProxy = (app, deps) => {
     SSE_HEARTBEAT_INTERVAL_MS = DEFAULT_SSE_HEARTBEAT_INTERVAL_MS,
     SSE_UPSTREAM_STALL_TIMEOUT_MS = DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
-    DURABLE_PROXY_TIMEOUT_MS,
   } = deps;
 
   if (app.get('opencodeProxyConfigured')) {
@@ -416,10 +415,8 @@ export const registerOpenCodeProxy = (app, deps) => {
   };
 
   const PROXY_REQUEST_TIMEOUT_MS = normalizeProxyTimeout(LONG_REQUEST_TIMEOUT_MS);
-  const DURABLE_PROXY_REQUEST_TIMEOUT_MS = normalizeProxyTimeout(
-    DURABLE_PROXY_TIMEOUT_MS ?? PROXY_REQUEST_TIMEOUT_MS,
-  );
   const PROXY_TIMEOUT_MARKER = Symbol('openchamberProxyTimedOut');
+  const UPSTREAM_TIMEOUT_MARKER = Symbol('openchamberUpstreamTimedOut');
 
   // A provider OAuth callback blocks upstream for as long as the user takes to
   // sign in in their browser (device-code polling, or a loopback redirect), so
@@ -893,12 +890,17 @@ export const registerOpenCodeProxy = (app, deps) => {
     },
     changeOrigin: true,
     pathRewrite: { '^/api': '' },
-    timeout: timeoutMs,
     proxyTimeout: timeoutMs,
     // Dynamic target — port can change after restart
     router: () => resolveProxyTarget(),
     on: {
       proxyReq: (proxyReq, req) => {
+        // `timeout` on http-proxy aborts the downstream request. Keep only the
+        // upstream timeout below so the client socket can receive the 504.
+        proxyReq.once('timeout', () => {
+          req[UPSTREAM_TIMEOUT_MARKER] = true;
+        });
+
         // Inject OpenCode auth headers
         const authHeaders = getOpenCodeAuthHeaders();
         if (authHeaders.Authorization) {
@@ -935,7 +937,7 @@ export const registerOpenCodeProxy = (app, deps) => {
         if (req?.[PROXY_TIMEOUT_MARKER]) {
           return;
         }
-        const statusCode = isProxyTimeoutError(err) ? 504 : 503;
+        const statusCode = req?.[UPSTREAM_TIMEOUT_MARKER] || isProxyTimeoutError(err) ? 504 : 503;
         sendProxyErrorResponse(res, statusCode);
       },
     },
@@ -955,11 +957,14 @@ export const registerOpenCodeProxy = (app, deps) => {
       const originalUrl = typeof req.originalUrl === 'string' ? req.originalUrl : _path;
       return buildDurableV2ProxyPath(originalUrl);
     },
-    timeout: DURABLE_PROXY_REQUEST_TIMEOUT_MS,
-    proxyTimeout: DURABLE_PROXY_REQUEST_TIMEOUT_MS,
+    proxyTimeout: PROXY_REQUEST_TIMEOUT_MS,
     router: () => resolveProxyTarget(),
     on: {
       proxyReq: (proxyReq, req) => {
+        proxyReq.once('timeout', () => {
+          req[UPSTREAM_TIMEOUT_MARKER] = true;
+        });
+
         const authHeaders = getOpenCodeAuthHeaders();
         if (authHeaders.Authorization) proxyReq.setHeader('Authorization', authHeaders.Authorization);
         const encodedDirectory = req.headers?.['x-opencode-directory-encoding'] === 'uri';
@@ -983,7 +988,7 @@ export const registerOpenCodeProxy = (app, deps) => {
         if (req?.[PROXY_TIMEOUT_MARKER]) {
           return;
         }
-        const statusCode = isProxyTimeoutError(err) ? 504 : 503;
+        const statusCode = req?.[UPSTREAM_TIMEOUT_MARKER] || isProxyTimeoutError(err) ? 504 : 503;
         sendProxyErrorResponse(res, statusCode);
       },
     },

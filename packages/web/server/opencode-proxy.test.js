@@ -465,7 +465,7 @@ describe('OpenCode proxy SSE forwarding', () => {
     });
   });
 
-  it('maps a durable proxy timeout independently of the shared request deadline', async () => {
+  it('maps a durable upstream timeout to 504 without closing the downstream response', async () => {
     const upstream = express();
     upstream.get('/api/session/abc/history', () => {});
     upstreamServer = await listen(upstream);
@@ -474,8 +474,7 @@ describe('OpenCode proxy SSE forwarding', () => {
     const app = express();
     registerOpenCodeProxy(app, {
       fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
-      LONG_REQUEST_TIMEOUT_MS: 200,
-      DURABLE_PROXY_TIMEOUT_MS: 30,
+      LONG_REQUEST_TIMEOUT_MS: 30,
       getRuntime: () => ({ openCodePort: upstreamPort, openCodeBaseUrl: externalBaseUrl, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
       getOpenCodeAuthHeaders: () => ({}),
       buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
@@ -489,6 +488,30 @@ describe('OpenCode proxy SSE forwarding', () => {
 
     expect(response.status).toBe(504);
     await expect(response.json()).resolves.toEqual({ error: 'OpenCode upstream timed out' });
+  });
+
+  it('maps an immediate upstream connection failure to 503', async () => {
+    const upstream = express();
+    upstreamServer = await listen(upstream);
+    const upstreamPort = upstreamServer.address().port;
+    await closeServer(upstreamServer);
+    upstreamServer = undefined;
+    const externalBaseUrl = `http://127.0.0.1:${upstreamPort}`;
+    const app = express();
+    registerOpenCodeProxy(app, {
+      fs: {}, os: {}, path, OPEN_CODE_READY_GRACE_MS: 0,
+      LONG_REQUEST_TIMEOUT_MS: 1000,
+      getRuntime: () => ({ openCodePort: upstreamPort, openCodeBaseUrl: externalBaseUrl, isOpenCodeReady: true, openCodeNotReadySince: 0, isRestartingOpenCode: false }),
+      getOpenCodeAuthHeaders: () => ({}),
+      buildOpenCodeUrl: (requestPath) => `${externalBaseUrl}${requestPath}`,
+      ensureOpenCodeApiPrefix: () => {},
+    });
+    proxyServer = await listen(app);
+
+    const response = await fetch(`http://127.0.0.1:${proxyServer.address().port}/api/session/abc/history`);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: 'OpenCode service unavailable' });
   });
 
   it('sanitizes experimental session list responses and forwards query params', async () => {
