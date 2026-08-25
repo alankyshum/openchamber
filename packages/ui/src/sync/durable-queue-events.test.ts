@@ -189,7 +189,7 @@ describe('durable queue event reconciliation', () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(otherDirectoryTarget).map((item) => item.clientMessageId)).toEqual(['msg_other'])
   })
 
-  test('evicts another cursor when updating the oldest entry at capacity', async () => {
+  test('evicts another cursor and its initialized-history marker at capacity', async () => {
     const targets = Array.from({ length: 100 }, (_, index) => createMessageQueueTarget(`ses-${index}`, '/repo', 'runtime-a')!)
     responses = [Response.json({ data: [admitted('msg-initial', 1, 'initial')], hasMore: false })]
     await replayDurableQueueHistory(targets[0]!)
@@ -198,13 +198,13 @@ describe('durable queue event reconciliation', () => {
     }
     const nextTarget = createMessageQueueTarget('ses-next', '/repo', 'runtime-a')!
     applyDurableQueueEvent(nextTarget, admitted('msg-next', 102, 'next'))
-    // The initialized target was evicted from the bounded cursor map. Replaying
-    // it after a new event must preserve the cursor supplied by its live event.
+    // The initialized target was evicted from the bounded cursor map. Its
+    // initialized marker must leave with it, so the next replay starts at zero.
     applyDurableQueueEvent(targets[0]!, admitted('msg-oldest', 101, 'updated'))
 
     responses = [Response.json({ data: [], hasMore: false })]
     await replayDurableQueueHistory(targets[0]!)
-    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo', after: '101' })
+    expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
   })
 
   test('preserves richer admission metadata when a durable update omits it', () => {
@@ -266,14 +266,19 @@ describe('durable queue event reconciliation', () => {
     ])
   })
 
-  test('keeps HTTP admittedSeq aligned with the durable event sequence', () => {
-    applyDurableQueueEvent(target, admitted('msg-sequence-contract', 17, 'ordered'))
+  test('removes an admitted item when its prompted event reaches the admitted sequence', () => {
+    const id = useMessageQueueStore.getState().addToQueue(target, {
+      content: 'ordered', admissionState: 'pending-admission', clientMessageId: 'msg-sequence-contract',
+    })
+    useMessageQueueStore.getState().markAdmissionAdmitted(target, id, { admittedSeq: 17, timeCreated: 1 })
 
-    const item = useMessageQueueStore.getState().getQueueForTarget(target)[0]
-    // The acknowledgement and event carry the same per-session sequence.
-    // Queue ordering compares it with prompted event sequences.
-    expect(item?.admissionAck?.admittedSeq).toBe(item?.durableSeq)
-    expect(item?.admissionAck?.admittedSeq).toBe(17)
+    applyDurableQueueEvent(target, {
+      type: 'session.next.prompted.1',
+      data: { messageID: 'msg-sequence-contract', sessionID: 'ses-1', delivery: 'queue' },
+      durable: { seq: 17 },
+    })
+
+    expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([])
   })
 
   test('retries a non-ok first replay from sequence zero', async () => {

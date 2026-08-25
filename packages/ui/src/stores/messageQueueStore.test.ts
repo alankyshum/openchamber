@@ -50,6 +50,20 @@ describe("message queue runtime ownership", () => {
     expect(queue[0]?.content).toBe("message-5")
   })
 
+  test("caps mixed admission states without reordering the queue", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    store.addToQueue(target, { content: "admitted-1", admissionState: "admitted" })
+    store.addToQueue(target, { content: "local-1", admissionState: "local" })
+    store.addToQueue(target, { content: "pending-1", admissionState: "pending-admission" })
+    store.addToQueue(target, { content: "local-2", admissionState: "local" })
+    store.addToQueue(target, { content: "admitted-2", admissionState: "admitted" })
+
+    expect(store.getQueueForTarget(target).map((message) => message.content)).toEqual([
+      "admitted-1", "local-1", "pending-1", "local-2", "admitted-2",
+    ])
+  })
+
   test("keeps a fresh pending target when the 51-target cap evicts an older target", () => {
     const targets = Array.from({ length: 50 }, (_, index) => createMessageQueueTarget(`session-${index}`, "/repo", "runtime-a")!)
     for (const target of targets) useMessageQueueStore.getState().addToQueue(target, { content: target.sessionId })

@@ -958,6 +958,11 @@ export const registerOpenCodeProxy = (app, deps) => {
       proxyReq: (proxyReq, req) => {
         const authHeaders = getOpenCodeAuthHeaders();
         if (authHeaders.Authorization) proxyReq.setHeader('Authorization', authHeaders.Authorization);
+        normalizeForwardedDirectoryHeaders(req.headers);
+        if (req.headers?.['x-opencode-directory']) {
+          proxyReq.setHeader('x-opencode-directory', req.headers['x-opencode-directory']);
+        }
+        proxyReq.removeHeader?.('x-opencode-directory-encoding');
         proxyReq.setHeader('accept-encoding', 'identity');
         replayParsedBody(proxyReq, req);
       },

@@ -94,6 +94,7 @@ export const applyDurableQueueEvent = (target: MessageQueueTarget, event: Durabl
       for (const oldestKey of cursors.keys()) {
         if (oldestKey !== key) {
           cursors.delete(oldestKey)
+          initializedHistory.delete(oldestKey)
           break
         }
       }

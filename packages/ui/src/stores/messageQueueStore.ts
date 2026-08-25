@@ -270,13 +270,19 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const admitted = candidateQueue.filter((item) => item.admissionState === 'admitted');
                         const pending = candidateQueue.filter((item) => item.admissionState === 'pending-admission');
                         const recoverable = candidateQueue.filter((item) => item.admissionState !== 'admitted' && item.admissionState !== 'pending-admission');
+                        const retained = new Set([
+                            ...recoverable.slice(-MAX_MESSAGES_PER_QUEUE),
+                            ...pending.slice(-MAX_PENDING_ADMISSIONS),
+                            ...admitted.slice(-MAX_ADMITTED_HISTORY),
+                        ]);
                         const queuedMessages = {
                             ...state.queuedMessages,
                             // Server-owned history has its own bound. It must not
                             // consume slots needed by recoverable local content.
-                            [key]: recoverable.slice(-MAX_MESSAGES_PER_QUEUE)
-                                .concat(pending.slice(-MAX_PENDING_ADMISSIONS))
-                                .concat(admitted.slice(-MAX_ADMITTED_HISTORY)),
+                            // Keep the surviving entries in their existing queue
+                            // order. Partitioning by ownership changes execution
+                            // order when local and server-owned entries are mixed.
+                            [key]: candidateQueue.filter((item) => retained.has(item)),
                         };
                         const keys = Object.keys(queuedMessages);
                         if (keys.length > MAX_QUEUE_TARGETS) {
