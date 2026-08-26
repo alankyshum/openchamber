@@ -336,13 +336,42 @@ describe('browser read action validation', () => {
 
     await service.execute('browser.extract', {
       itemSelector: 'article',
-      fields: [{ name: 'title', from: 'text', selector: 'h2', max: 20 }],
+      fields: [
+        { name: 'title', from: 'text', selector: 'h2', max: 20 },
+        { name: 'hrefs', from: 'href', selector: 'a[href]', multiple: true },
+      ],
       max: 3,
       includeText: true,
     });
     expect(request).toHaveBeenCalledWith('browser.extract', expect.objectContaining({
       itemSelector: 'article', max: 3, includeText: true,
     }), expect.anything());
+  });
+
+  it('accepts typed multi-value field sources', async () => {
+    const { service, request } = createReadService();
+    await service.execute('browser.extract', {
+      itemSelector: 'article',
+      fields: [
+        { name: 'times', from: 'datetime', selector: 'time', multiple: true },
+        { name: 'toggles', from: 'ariaPressed', selector: '[aria-pressed]', multiple: true },
+      ],
+    });
+    expect(request).toHaveBeenCalledWith('browser.extract', expect.objectContaining({
+      fields: expect.arrayContaining([
+        expect.objectContaining({ name: 'times', from: 'datetime', multiple: true }),
+        expect.objectContaining({ name: 'toggles', from: 'ariaPressed', multiple: true }),
+      ]),
+    }), expect.anything());
+  });
+
+  it('rejects non-boolean multiple values before waking the browser', async () => {
+    const { service, request } = createReadService();
+    await expect(service.execute('browser.extract', {
+      itemSelector: 'article',
+      fields: [{ name: 'links', from: 'href', selector: 'a', multiple: 'true' }],
+    })).rejects.toThrow('fields[0].multiple must be boolean');
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('redacts sensitive URL query values in browser results without changing the path', async () => {

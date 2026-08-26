@@ -154,7 +154,7 @@ describe('managed agent tool runtime', () => {
         }),
       }),
     }));
-    expect(Object.keys(webProperties.fields.items.properties).sort()).toEqual(['attr', 'from', 'max', 'name', 'selector']);
+    expect(Object.keys(webProperties.fields.items.properties).sort()).toEqual(['attr', 'from', 'max', 'multiple', 'name', 'selector']);
     for (const property of ['itemSelector', 'fields', 'max', 'includeText', 'rounds', 'settleMs']) {
       expect(Object.hasOwn(tool.openchamber.args.parameters.properties, property)).toBe(false);
     }

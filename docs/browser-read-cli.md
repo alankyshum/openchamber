@@ -107,8 +107,9 @@ Field {
   name:      string   // required; ^[a-z][a-zA-Z0-9_]{0,39}$; unique within fields[]
   from:      enum     // required; see below
   selector?: string   // relative to the item; defaults to the item element
-  attr?:     string   // required iff from === 'attr'; forbidden otherwise
-  max?:      integer  // 1..MAX_FIELD_CHARS, default MAX_FIELD_CHARS
+  attr?:      string   // required iff from === 'attr'; forbidden otherwise
+  max?:       integer  // 1..MAX_FIELD_CHARS, default MAX_FIELD_CHARS
+  multiple?: boolean  // when true, return all matching elements in DOM order
 }
 ```
 
@@ -129,6 +130,15 @@ make a future write feature act on a wrong belief.
 `datetime` returns both halves because they answer different questions and
 degrade separately: the machine timestamp may be absent while the visible label
 ("2h") is present. Neither is ever synthesized from the other.
+
+When `multiple` is true, the field selector is evaluated with `querySelectorAll`
+and the field value is an array of individually read values in DOM order. At
+most `MAX_FIELD_VALUES` (100) matches are read; exceeding this cap adds the field
+to `truncatedFields` and is reported by `fieldValuesTruncated`. Unreadable
+values may make the returned array shorter than the number of matches read.
+The per-value character cap and total response budget still apply. String and
+datetime members are truncated per value, while booleans remain booleans and
+URL redaction is retained.
 
 `additionalProperties: false`. An unknown key inside a field entry is a `400`,
 not an ignored key — a silently dropped spec reads as an empty result and sends
@@ -156,7 +166,7 @@ the caller hunting in the wrong place.
 
   // Truncation flags — present only when they bit:
   "itemsTruncated": true, "itemsOnPage": 240,
-  "fieldsTruncated": true,
+  "fieldsTruncated": true, "fieldValuesTruncated": true,
   "budgetExhausted": true, "itemsReturned": 42
 }
 ```
@@ -252,6 +262,7 @@ Bounded by the caps, not by the size of the page — the same property
 | `MAX_ITEMS` | 100 | A screen of feed cards is tens; 100 spans several scroll rounds without a second call |
 | `MAX_FIELDS` | 12 | Wider than any real card (author, url, time, body, four counts, two states) and narrow enough to bound the product |
 | `MAX_FIELD_CHARS` | 1 000 | A social post body fits; a field is a value, not a document |
+| `MAX_FIELD_VALUES` | 100 | Bounds DOM reads and preserves typed multi-value arrays |
 | `MAX_ITEM_TEXT_CHARS` | 2 000 | `includeText` is a fallback for un-modelled markup, so it is looser than a field but still per-item |
 | `MAX_TOTAL_CHARS` | 512 000 | The real ceiling — see below |
 | `MAX_SCROLL_ROUNDS` | 20 | Enough to walk a feed; short enough to stay under the 20 s action budget with a settle delay |

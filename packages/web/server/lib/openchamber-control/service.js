@@ -88,7 +88,7 @@ const validateExtractFields = (fields) => {
   const names = new Set();
   return fields.map((field, index) => {
     if (!field || typeof field !== 'object' || Array.isArray(field)) throw new OpenChamberControlError(`fields[${index}] must be an object`, 400);
-    rejectUnknownKeys(field, ['name', 'from', 'selector', 'attr', 'max'], `fields[${index}]`);
+    rejectUnknownKeys(field, ['name', 'from', 'selector', 'attr', 'max', 'multiple'], `fields[${index}]`);
     const name = asNonEmptyString(field.name);
     if (!name || !/^[a-z][a-zA-Z0-9_]{0,39}$/.test(name)) throw new OpenChamberControlError(`fields[${index}].name is invalid`, 400);
     if (names.has(name)) throw new OpenChamberControlError(`fields[${index}].name must be unique`, 400);
@@ -102,7 +102,8 @@ const validateExtractFields = (fields) => {
       if (!attr || !/^[a-zA-Z][a-zA-Z0-9:_.-]{0,63}$/.test(attr) || /(token|csrf|auth|session|secret|key|nonce|signature|jwt|bearer)/i.test(attr)) throw new OpenChamberControlError(`fields[${index}].attr is invalid`, 400);
     } else if (field.attr !== undefined) throw new OpenChamberControlError(`fields[${index}].attr is only valid with from attr`, 400);
     const max = boundedInteger(field.max, 1_000, `fields[${index}].max`, 1_000);
-    return { name, from, ...(selector ? { selector } : {}), ...(attr ? { attr } : {}), max };
+    if (field.multiple !== undefined && field.multiple !== true && field.multiple !== false) throw new OpenChamberControlError(`fields[${index}].multiple must be boolean`, 400);
+    return { name, from, ...(selector ? { selector } : {}), ...(attr ? { attr } : {}), max, ...(field.multiple ? { multiple: true } : {}) };
   });
 };
 

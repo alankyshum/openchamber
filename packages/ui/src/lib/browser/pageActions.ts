@@ -24,6 +24,7 @@ const MAX_LABEL_CHARS = 80;
 const MAX_ITEMS = 100;
 const MAX_FIELDS = 12;
 const MAX_FIELD_CHARS = 1_000;
+const MAX_FIELD_VALUES = 100;
 const MAX_ITEM_TEXT_CHARS = 2_000;
 const MAX_TOTAL_CHARS = 512_000;
 const MAX_SCROLL_ROUNDS = 20;
@@ -40,6 +41,7 @@ const HELPERS = `
   var MAX_ITEMS = ${MAX_ITEMS};
   var MAX_FIELDS = ${MAX_FIELDS};
   var MAX_FIELD_CHARS = ${MAX_FIELD_CHARS};
+  var MAX_FIELD_VALUES = ${MAX_FIELD_VALUES};
   var MAX_TOTAL_CHARS = ${MAX_TOTAL_CHARS};
   var MAX_SCROLL_ROUNDS = ${MAX_SCROLL_ROUNDS};
   var MAX_SETTLE_MS = ${MAX_SETTLE_MS};
@@ -285,7 +287,7 @@ export const buildExtractScript = ({
 }: {
   selector?: string;
   itemSelector: string;
-  fields: Array<{ name: string; from: string; selector?: string; attr?: string; max?: number }>;
+  fields: Array<{ name: string; from: string; selector?: string; attr?: string; max?: number; multiple?: boolean }>;
   max?: number;
   includeText?: boolean;
 }): string => wrap(`
@@ -309,6 +311,8 @@ export const buildExtractScript = ({
   var returned = [];
   var budget = 0;
   var fieldsTruncated = false;
+  var fieldValuesTruncated = false;
+  var fieldValuesTruncatedForItem = {};
   var budgetExhausted = false;
   var normalize = function (value) { return String(value || '').replace(/\\s+/g, ' ').trim(); };
   var cut = function (value, cap) {
@@ -318,12 +322,22 @@ export const buildExtractScript = ({
     return result;
   };
   var relative = function (item, field) {
-    if (!field.selector) return item;
-    try { return item.querySelector(field.selector); }
-    catch (error) { return null; }
+    if (!field.selector) return field.multiple ? [item] : item;
+    try {
+      var matches = item.querySelectorAll(field.selector);
+      if (field.multiple && matches.length > MAX_FIELD_VALUES) {
+        fieldValuesTruncated = true;
+        fieldValuesTruncatedForItem[field.name] = true;
+      }
+      return field.multiple ? Array.from(matches).slice(0, MAX_FIELD_VALUES) : (matches[0] || null);
+    }
+    catch (error) { return field.multiple ? [] : null; }
   };
   var read = function (item, field) {
     var target = relative(item, field);
+    if (Array.isArray(target)) {
+      return target.map(function (element) { return read(element, { ...field, selector: undefined, multiple: false }); }).filter(function (value) { return value !== null; });
+    }
     if (!target) return field.from === 'attr' || field.from === 'href' || field.from === 'datetime' ? null : (field.from === 'ariaPressed' ? null : '');
     if (field.from === 'text') return String(target.innerText || target.textContent || '');
     if (field.from === 'aria') return accessibleName(target);
@@ -347,6 +361,7 @@ export const buildExtractScript = ({
 
   for (var i = 0; i < items.length && i < limit; i += 1) {
     var item = items[i];
+    fieldValuesTruncatedForItem = {};
     var values = {};
     var truncated = [];
     var omittedFields = [];
@@ -355,18 +370,43 @@ export const buildExtractScript = ({
       var field = fields[f];
       var value = read(item, field);
       var fieldWasTruncated = false;
+      if (fieldValuesTruncatedForItem[field.name]) {
+        truncated.push(field.name);
+        fieldWasTruncated = true;
+      }
       if (typeof value === 'string') {
         var beforeLength = value.length;
         value = cut(value, field.max);
-        fieldWasTruncated = value.length < beforeLength;
+        fieldWasTruncated = fieldWasTruncated || value.length < beforeLength;
+      } else if (Array.isArray(value)) {
+        var originalValues = value;
+        value = originalValues.map(function (entry) {
+          if (typeof entry === 'string') return cut(entry, field.max);
+          if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+            return { iso: entry.iso == null ? null : cut(entry.iso, field.max), label: cut(entry.label, field.max) };
+          }
+          return entry;
+        });
+        fieldWasTruncated = fieldWasTruncated || value.some(function (entry, index) {
+          var original = originalValues[index];
+          if (typeof original === 'string') return entry.length < original.length;
+          if (original && typeof original === 'object' && !Array.isArray(original)) {
+            return (original.iso != null && entry.iso.length < String(original.iso).length)
+              || entry.label.length < String(original.label).length;
+          }
+          return false;
+        });
       } else if (value && typeof value === 'object') {
         var originalIso = value.iso;
         var originalLabel = value.label;
         value = { iso: originalIso == null ? null : cut(originalIso, field.max), label: cut(originalLabel, field.max) };
-        fieldWasTruncated = (originalIso != null && value.iso.length < String(originalIso).length)
+        fieldWasTruncated = fieldWasTruncated || (originalIso != null && value.iso.length < String(originalIso).length)
           || value.label.length < String(originalLabel).length;
       }
-      if (fieldWasTruncated) { truncated.push(field.name); fieldsTruncated = true; }
+      if (fieldWasTruncated) {
+        if (truncated.indexOf(field.name) === -1) truncated.push(field.name);
+        fieldsTruncated = true;
+      }
       var fieldCost = typeof value === 'string' ? value.length : JSON.stringify(value).length;
       if (budget + entryCost + fieldCost > MAX_TOTAL_CHARS) {
         budgetExhausted = true;
@@ -406,6 +446,7 @@ export const buildExtractScript = ({
   if (items.length > returned.length && returned.length === limit) { result.itemsTruncated = true; result.itemsOnPage = items.length; }
   if (fields.length > MAX_FIELDS) result.fieldsTruncated = true;
   if (fieldsTruncated) result.fieldsTruncated = true;
+  if (fieldValuesTruncated) result.fieldValuesTruncated = true;
   if (budgetExhausted) { result.budgetExhausted = true; result.itemsReturned = returned.length; }
   return result;
 `);

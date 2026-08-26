@@ -53,6 +53,7 @@ const BROWSER_EXTRACT_FIELD = Object.freeze({
     selector: { type: 'string', description: 'Optional selector relative to the repeated item' },
     attr: { type: 'string', description: "Attribute name; required only when from is 'attr'" },
     max: { type: 'integer', minimum: 1, maximum: 1000, description: 'Maximum characters to return for this field' },
+    multiple: { type: 'boolean', description: 'Return up to 100 matching elements in DOM order instead of only the first; unreadable values are omitted and truncation is reported' },
   },
   required: ['name', 'from'],
   additionalProperties: false,
