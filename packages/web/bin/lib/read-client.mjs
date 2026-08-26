@@ -36,9 +36,12 @@ export async function executeRead(port, action, input, options = {}) {
   }
   const token = options.token || process.env.OPENCHAMBER_TOKEN;
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const requestJsonImpl = options.requestJson || requestJson;
+  const requestOptions = { ...options };
+  delete requestOptions.requestJson;
   try {
-    const { response, body } = await requestJson(port, '/api/openchamber/control', {
-      ...options, headers, timeoutMs: action === 'browser.open' || action === 'browser.navigate' ? 45_000 : 20_000, method: 'POST',
+    const { response, body } = await requestJsonImpl(port, '/api/openchamber/control', {
+      ...requestOptions, headers, timeoutMs: action === 'browser.open' || action === 'browser.navigate' ? 45_000 : 20_000, method: 'POST',
       body: JSON.stringify({ action, input, mode: 'read' }),
     });
     if (response?.ok && body?.ok !== false) return body;

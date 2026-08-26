@@ -8,8 +8,18 @@ const isTrustedAuthOrigin = (requestUrl) => {
   try {
     const parsed = new URL(requestUrl);
     const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    return hostname === 'localhost' || hostname === '::1' || hostname === '127.0.0.1'
-      || hostname.startsWith('127.');
+    if (hostname === 'localhost' || hostname === '::1') return true;
+    // URL canonicalizes IPv4 shorthand and leading-zero forms (for example
+    // `127.1.2` becomes `127.1.0.2`). Inspect the authority as supplied too,
+    // so only an actual four-octet IPv4 literal is trusted.
+    const authority = requestUrl.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i)?.[1] ?? '';
+    const rawHostname = authority.replace(/^[^@]*@/, '').replace(/^\[([^\]]+)\](?::\d*)?$/, '$1').split(':')[0].toLowerCase();
+    if (rawHostname !== hostname && rawHostname.startsWith('127.')) return false;
+    const octets = hostname.split('.');
+    return octets.length === 4
+      && octets[0] === '127'
+      && octets.slice(1).every((octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet)
+        && Number(octet) <= 255);
   } catch {
     return false;
   }

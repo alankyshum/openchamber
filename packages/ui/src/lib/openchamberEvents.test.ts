@@ -72,4 +72,32 @@ describe('openchamber events', () => {
     ]);
     unsubscribe();
   });
+
+  test('preserves browser control mode from the SSE envelope', async () => {
+    const { subscribeOpenchamberEvents } = await import('./openchamberEvents');
+    const events: unknown[] = [];
+    const unsubscribe = subscribeOpenchamberEvents((event) => events.push(event));
+    const source = MockEventSource.instances[0];
+
+    source.onmessage?.({
+      data: JSON.stringify({
+        type: 'openchamber:browser-control-request',
+        properties: {
+          requestId: 'req-read',
+          action: 'browser.snapshot',
+          parameters: { selector: 'main' },
+          mode: 'read',
+        },
+      }),
+    });
+
+    expect(events).toEqual([{
+      type: 'browser-control-request',
+      requestId: 'req-read',
+      action: 'browser.snapshot',
+      parameters: { selector: 'main' },
+      mode: 'read',
+    }]);
+    unsubscribe();
+  });
 });

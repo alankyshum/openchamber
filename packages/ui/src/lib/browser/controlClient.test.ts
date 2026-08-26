@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
-type Listener = (event: { type: string; requestId: string; action: string; parameters: Record<string, unknown> }) => void;
+type Listener = (event: { type: string; requestId: string; action: string; parameters: Record<string, unknown>; mode?: 'read' | 'write' }) => void;
 
 const posted: Array<{ requestId: string; ok: boolean; data?: unknown; error?: string }> = [];
 const claims: string[] = [];
@@ -32,7 +32,7 @@ const { registerBrowserController, registerBrowserOpener } = await import('./con
 const cleanups: Array<() => void> = [];
 
 const emitOpen = (parameters: Record<string, unknown>): void => {
-  listener?.({ type: 'browser-control-request', requestId: 'req-1', action: 'browser.open', parameters });
+  listener?.({ type: 'browser-control-request', requestId: 'req-1', action: 'browser.open', parameters, mode: 'write' });
 };
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,6 +108,18 @@ describe('opening a page before any view exists', () => {
 
     expect(claims).toEqual(['req-1']);
     expect(ran).toEqual(['browser.click']);
+  });
+
+  test('passes read mode to the controller so it can enforce the read contract', async () => {
+    let receivedMode: 'read' | 'write' | undefined;
+    cleanups.push(registerBrowserController({
+      run: async (_action, _parameters, mode) => { receivedMode = mode; return {}; },
+    }));
+
+    listener?.({ type: 'browser-control-request', requestId: 'req-1', action: 'browser.snapshot', parameters: {}, mode: 'read' });
+    await wait(50);
+
+    expect(receivedMode).toBe('read');
   });
 
   test('does not wait for a view when no layout was requested', async () => {

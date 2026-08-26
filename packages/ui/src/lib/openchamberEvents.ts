@@ -29,6 +29,7 @@ type BrowserControlRequestEvent = {
   requestId: string;
   action: string;
   parameters: Record<string, unknown>;
+  mode: 'read' | 'write';
 };
 
 /**
@@ -183,6 +184,7 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     }
 
     const rawParameters = properties?.parameters;
+    const mode = properties?.mode === 'read' ? 'read' : 'write';
     const nextEvent: BrowserControlRequestEvent = {
       type: 'browser-control-request',
       requestId,
@@ -190,6 +192,7 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
       parameters: rawParameters && typeof rawParameters === 'object' && !Array.isArray(rawParameters)
         ? rawParameters as Record<string, unknown>
         : {},
+      mode,
     };
     for (const listener of listeners) {
       listener(nextEvent);

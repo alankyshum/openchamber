@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { executeRead, readSpec, success, failure, READ_ACTIONS, READ_EXIT } from './lib/read-client.mjs';
+import { isTrustedAuthOrigin } from './lib/cli-http.js';
 
 const HELP = `OpenChamber read-only browser CLI
 
@@ -46,8 +47,7 @@ async function main(argv = process.argv.slice(2)) {
     try {
       const parsed = new URL(common.server);
       if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
-      const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-      if (!['localhost', '127.0.0.1', '::1'].includes(hostname) && !hostname.startsWith('127.')) {
+      if (!isTrustedAuthOrigin(parsed.toString())) {
         throw new Error('foreign origin');
       }
     } catch {
