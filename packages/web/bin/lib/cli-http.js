@@ -4,6 +4,19 @@ import { getInstanceFilePath, readInstanceOptions } from './cli-process.js';
 
 const UI_SESSION_COOKIE_NAME = 'oc_ui_session';
 
+const isTrustedAuthOrigin = (requestUrl) => {
+  try {
+    const parsed = new URL(requestUrl);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return hostname === 'localhost' || hostname === '::1' || hostname === '127.0.0.1'
+      || hostname.startsWith('127.');
+  } catch {
+    return false;
+  }
+};
+
+export { isTrustedAuthOrigin };
+
 function extractUiSessionCookie(response) {
   const values = [];
   const direct = response?.headers?.get?.('set-cookie');
@@ -57,6 +70,7 @@ async function createUiSessionCookie(port, password, timeoutMs) {
       },
       body: JSON.stringify({ password }),
       signal: controller.signal,
+      redirect: 'manual',
     });
     if (!response.ok) {
       return null;
@@ -105,11 +119,15 @@ async function requestJson(port, endpoint, options = {}) {
   const fetchOptions = { ...options };
   delete fetchOptions.timeoutMs;
   delete fetchOptions.uiPassword;
+  delete fetchOptions.server;
+  delete fetchOptions.token;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const requestUrl = buildLocalUrl(port, endpoint);
+    const requestUrl = typeof options.server === 'string' && options.server.trim()
+      ? new URL(endpoint, `${options.server.replace(/\/$/, '')}/`).toString()
+      : buildLocalUrl(port, endpoint);
     const requestHeaders = {
       Accept: 'application/json',
       ...(fetchOptions.body ? { 'Content-Type': 'application/json' } : {}),
@@ -119,11 +137,24 @@ async function requestJson(port, endpoint, options = {}) {
     if (desktopAuth) {
       requestHeaders.Authorization = desktopAuth;
     }
+    // An explicitly selected server is untrusted until proven local. Never let
+    // a token, desktop credential, or session password turn an arbitrary URL
+    // into a credential sink (this also covers OPENCHAMBER_URL).
+    const hasCredential = Boolean(requestHeaders.Authorization || requestHeaders.authorization
+      || requestHeaders.Cookie || requestHeaders.cookie
+      || options.uiPassword || options.token || process.env.OPENCHAMBER_TOKEN);
+    if (hasCredential && !isTrustedAuthOrigin(requestUrl)) {
+      throw new Error('Refusing to send credentials to an untrusted server; use a trusted loopback or desktop origin.');
+    }
     const response = await fetch(requestUrl, {
       ...fetchOptions,
       headers: requestHeaders,
       signal: controller.signal,
+      redirect: 'manual',
     });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`Refusing redirected response from ${requestUrl}.`);
+    }
     const body = await response.json().catch(() => null);
     if (response.status === 401 && body?.error === 'UI authentication required') {
       const uiPassword = await resolveUiPasswordForPort(port, options);
@@ -136,7 +167,11 @@ async function requestJson(port, endpoint, options = {}) {
             Cookie: cookie,
           },
           signal: controller.signal,
+          redirect: 'manual',
         });
+        if (retryResponse.status >= 300 && retryResponse.status < 400) {
+          throw new Error(`Refusing redirected response from ${requestUrl}.`);
+        }
         const retryBody = await retryResponse.json().catch(() => null);
         return { response: retryResponse, body: retryBody };
       }

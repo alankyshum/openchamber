@@ -26,6 +26,13 @@ export type BrowserNavStatus =
 
 export const IDLE_NAV_STATUS: BrowserNavStatus = { kind: 'idle' };
 
+/** The only browser capabilities the read-only control client may dispatch. */
+export const BROWSER_READ_ACTIONS = Object.freeze([
+  'browser.open', 'browser.navigate', 'browser.snapshot', 'browser.extract',
+  'browser.scroll', 'browser.scrollWithin', 'browser.inspect',
+  'browser.back', 'browser.forward', 'browser.resize',
+] as const);
+
 /** The URL a nav status refers to, or '' when idle. */
 export const navStatusUrl = (status: BrowserNavStatus): string => (
   status.kind === 'idle' ? '' : status.url

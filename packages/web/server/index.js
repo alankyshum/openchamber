@@ -1349,6 +1349,7 @@ const browserControlBroker = createBrowserControlBroker({
             requestId: request.requestId,
             action: request.action,
             parameters: request.parameters,
+            mode: request.mode,
           },
         });
         delivered += 1;

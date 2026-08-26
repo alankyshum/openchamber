@@ -21,6 +21,13 @@ const MAX_TEXT_CHARS = 6_000;
 const MAX_ELEMENTS = 120;
 /** Enough to recognise a control; full labels are what made entries expensive. */
 const MAX_LABEL_CHARS = 80;
+const MAX_ITEMS = 100;
+const MAX_FIELDS = 12;
+const MAX_FIELD_CHARS = 1_000;
+const MAX_ITEM_TEXT_CHARS = 2_000;
+const MAX_TOTAL_CHARS = 512_000;
+const MAX_SCROLL_ROUNDS = 20;
+const MAX_SETTLE_MS = 2_000;
 
 /**
  * Shared helpers, injected into each script. `describe` builds the same kind of
@@ -30,6 +37,12 @@ const MAX_LABEL_CHARS = 80;
 const HELPERS = `
   var MAX_ELEMENTS = ${MAX_ELEMENTS};
   var MAX_LABEL_CHARS = ${MAX_LABEL_CHARS};
+  var MAX_ITEMS = ${MAX_ITEMS};
+  var MAX_FIELDS = ${MAX_FIELDS};
+  var MAX_FIELD_CHARS = ${MAX_FIELD_CHARS};
+  var MAX_TOTAL_CHARS = ${MAX_TOTAL_CHARS};
+  var MAX_SCROLL_ROUNDS = ${MAX_SCROLL_ROUNDS};
+  var MAX_SETTLE_MS = ${MAX_SETTLE_MS};
   var visible = function (element) {
     var rect = element.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return false;
@@ -127,6 +140,41 @@ const HELPERS = `
     var value = element.getAttribute('value');
     return value && String(value).trim() ? String(value).trim() : '';
   };
+  var redactUrl = function (value) {
+    try {
+      var parsed = new URL(String(value), location.href);
+      var sensitive = ['token', 'access_token', 'refresh_token', 'auth', 'code', 'key', 'secret', 'session', 'nonce', 'signature', 'jwt'];
+      parsed.searchParams.forEach(function (current, name) {
+        if (sensitive.some(function (part) { return name.toLowerCase().indexOf(part) !== -1; })) parsed.searchParams.set(name, '[REDACTED]');
+      });
+      return parsed.href;
+    } catch (error) { return String(value); }
+  };
+  var redactOutput = function (value) {
+    if (value == null) return value;
+    var text = String(value);
+    if (/^https?:\\/\\//i.test(text)) return redactUrl(text);
+    // Attribute values may be relative links. Redact only values that are
+    // unambiguously URL-shaped; ordinary attribute/body text must be returned
+    // byte-for-byte rather than being normalized or rewritten.
+    // Cover absolute, root-relative, and ordinary relative URLs, while
+    // leaving arbitrary attribute text untouched when it has no query.
+    if (/^[^\\s?#]+[?&][^\\s]*=/i.test(text)) {
+      try {
+        var parsed = new URL(text, location.href);
+        var sensitive = ['token', 'access_token', 'refresh_token', 'auth', 'code', 'key', 'secret', 'session', 'nonce', 'signature', 'jwt'];
+        var hadSensitive = false;
+        parsed.searchParams.forEach(function (current, name) {
+          if (sensitive.some(function (part) { return name.toLowerCase().indexOf(part) !== -1; })) {
+            parsed.searchParams.set(name, '[REDACTED]');
+            hadSensitive = true;
+          }
+        });
+        if (hadSensitive) return parsed.pathname + parsed.search + parsed.hash;
+      } catch (error) { /* keep the exact attribute value */ }
+    }
+    return text;
+  };
   var findByText = function (needle) {
     var wanted = String(needle).replace(/\\s+/g, ' ').trim().toLowerCase();
     var candidates = document.querySelectorAll('a, button, [role="button"], [role="link"], input[type="submit"], input[type="button"], summary, label');
@@ -197,11 +245,12 @@ export const buildSnapshotScript = ({ selector }: { selector?: string } = {}): s
     elements.push(entry);
   }
   var body = document.body ? (document.body.innerText || '') : '';
-  var text = body.replace(/\\n{3,}/g, '\\n\\n').trim();
+  // Body text is data, not metadata: preserve it exactly.
+  var text = body;
   var docEl = document.documentElement;
   var result = {
     ok: true,
-    url: String(location.href),
+    url: redactUrl(String(location.href)),
     title: String(document.title || ''),
     scope: scopeSelector || 'document',
     scrollY: Math.round(window.scrollY),
@@ -219,6 +268,145 @@ export const buildSnapshotScript = ({ selector }: { selector?: string } = {}): s
     result.elementsTruncated = true;
     result.interactiveElementsOnPage = visibleTotal;
   }
+  return result;
+`);
+
+/**
+ * Extracts a bounded, declarative set of values from repeated elements.  The
+ * field source is an enum rather than a property path or an expression: the
+ * page receives data, never code, from the caller.
+ */
+export const buildExtractScript = ({
+  selector,
+  itemSelector,
+  fields,
+  max,
+  includeText,
+}: {
+  selector?: string;
+  itemSelector: string;
+  fields: Array<{ name: string; from: string; selector?: string; attr?: string; max?: number }>;
+  max?: number;
+  includeText?: boolean;
+}): string => wrap(`
+  var scopeSelector = ${JSON.stringify(selector ?? '')};
+  var itemSelector = ${JSON.stringify(itemSelector)};
+  var fields = ${JSON.stringify(fields)};
+  var requestedMax = ${JSON.stringify(max ?? MAX_ITEMS)};
+  var withText = ${includeText === true ? 'true' : 'false'};
+  var root = document;
+  if (scopeSelector) {
+    try { root = document.querySelector(scopeSelector); }
+    catch (error) { return { ok: false, error: 'Invalid selector: ' + scopeSelector }; }
+    if (!root) return { ok: false, error: 'No element matches ' + scopeSelector };
+  }
+  var items;
+  try { items = root.querySelectorAll(itemSelector); }
+  catch (error) { return { ok: false, error: 'Invalid selector: ' + itemSelector }; }
+  if (!items.length) return { ok: false, error: 'No elements match ' + itemSelector };
+
+  var limit = Math.max(1, Math.min(MAX_ITEMS, Number(requestedMax) || MAX_ITEMS));
+  var returned = [];
+  var budget = 0;
+  var fieldsTruncated = false;
+  var budgetExhausted = false;
+  var normalize = function (value) { return String(value || '').replace(/\\s+/g, ' ').trim(); };
+  var cut = function (value, cap) {
+    var text = String(value);
+    var result = text.slice(0, Math.min(MAX_FIELD_CHARS, Math.max(1, Number(cap) || MAX_FIELD_CHARS)));
+    if (result.length < text.length) fieldsTruncated = true;
+    return result;
+  };
+  var relative = function (item, field) {
+    if (!field.selector) return item;
+    try { return item.querySelector(field.selector); }
+    catch (error) { return null; }
+  };
+  var read = function (item, field) {
+    var target = relative(item, field);
+    if (!target) return field.from === 'attr' || field.from === 'href' || field.from === 'datetime' ? null : (field.from === 'ariaPressed' ? null : '');
+    if (field.from === 'text') return String(target.innerText || target.textContent || '');
+    if (field.from === 'aria') return accessibleName(target);
+    if (field.from === 'attr') return redactOutput(target.getAttribute(String(field.attr)));
+    if (field.from === 'href') {
+      var href = target.getAttribute('href');
+      if (!href) return null;
+      try { return redactUrl(String(new URL(href, location.href).href)); } catch (error) { return null; }
+    }
+    if (field.from === 'datetime') {
+      var time = target.matches && target.matches('time[datetime]') ? target : target.querySelector('time[datetime]');
+      if (!time) return null;
+      return { iso: time.getAttribute('datetime'), label: String(time.innerText || time.textContent || '') };
+    }
+    if (field.from === 'ariaPressed') {
+      var pressed = target.getAttribute('aria-pressed');
+      return pressed === 'true' ? true : (pressed === 'false' ? false : null);
+    }
+    return null;
+  };
+
+  for (var i = 0; i < items.length && i < limit; i += 1) {
+    var item = items[i];
+    var values = {};
+    var truncated = [];
+    var omittedFields = [];
+    var entryCost = 0;
+    for (var f = 0; f < fields.length && f < MAX_FIELDS; f += 1) {
+      var field = fields[f];
+      var value = read(item, field);
+      var fieldWasTruncated = false;
+      if (typeof value === 'string') {
+        var beforeLength = value.length;
+        value = cut(value, field.max);
+        fieldWasTruncated = value.length < beforeLength;
+      } else if (value && typeof value === 'object') {
+        var originalIso = value.iso;
+        var originalLabel = value.label;
+        value = { iso: originalIso == null ? null : cut(originalIso, field.max), label: cut(originalLabel, field.max) };
+        fieldWasTruncated = (originalIso != null && value.iso.length < String(originalIso).length)
+          || value.label.length < String(originalLabel).length;
+      }
+      if (fieldWasTruncated) { truncated.push(field.name); fieldsTruncated = true; }
+      var fieldCost = typeof value === 'string' ? value.length : JSON.stringify(value).length;
+      if (budget + entryCost + fieldCost > MAX_TOTAL_CHARS) {
+        budgetExhausted = true;
+        omittedFields.push(field.name);
+        for (var omitted = f + 1; omitted < fields.length && omitted < MAX_FIELDS; omitted += 1) omittedFields.push(fields[omitted].name);
+        break;
+      }
+      entryCost += fieldCost;
+      values[field.name] = value;
+    }
+    var text = withText ? String(item.innerText || item.textContent || '') : '';
+    var textTruncated = false;
+    if (withText) {
+      if (text.length > ${MAX_ITEM_TEXT_CHARS}) { text = text.slice(0, ${MAX_ITEM_TEXT_CHARS}); textTruncated = true; fieldsTruncated = true; }
+      if (budget + entryCost + text.length > MAX_TOTAL_CHARS) {
+        budgetExhausted = true;
+        text = '';
+        textTruncated = false;
+      } else {
+        entryCost += text.length;
+      }
+    }
+    budget += entryCost;
+    var resultItem = { index: i, selector: cssPath(item), values: values };
+    if (withText) resultItem.text = text;
+    if (truncated.length) resultItem.truncatedFields = truncated;
+    if (textTruncated) resultItem.textTruncated = true;
+    if (budgetExhausted && withText && !text) omittedFields.push('text');
+    if (omittedFields.length) resultItem.omittedFields = omittedFields;
+    returned.push(resultItem);
+    if (budgetExhausted) break;
+  }
+  var docEl = document.documentElement;
+  var scrollY = Math.round(window.scrollY);
+  var maxScrollY = Math.max(0, Math.round(docEl.scrollHeight - window.innerHeight));
+  var result = { ok: true, url: redactUrl(String(location.href)), title: String(document.title || ''), scope: scopeSelector || 'document', itemSelector: itemSelector, items: returned, scrollY: scrollY, maxScrollY: maxScrollY, atTop: scrollY <= 1, atBottom: scrollY >= maxScrollY - 1, viewport: { width: window.innerWidth, height: window.innerHeight } };
+  if (items.length > returned.length && returned.length === limit) { result.itemsTruncated = true; result.itemsOnPage = items.length; }
+  if (fields.length > MAX_FIELDS) result.fieldsTruncated = true;
+  if (fieldsTruncated) result.fieldsTruncated = true;
+  if (budgetExhausted) { result.budgetExhausted = true; result.itemsReturned = returned.length; }
   return result;
 `);
 
@@ -331,6 +519,68 @@ export const buildScrollScript = ({ selector, direction }: { selector?: string; 
   else if (direction === 'bottom') window.scrollTo({ top: bottom, behavior: 'instant' });
   else return { ok: false, error: 'Unknown scroll direction: ' + direction };
   return settle({ direction: direction });
+`);
+
+/** Scrolls the nearest overflowing ancestor, with bounded rounds and settling. */
+export const buildScrollWithinScript = ({
+  selector,
+  direction,
+  rounds,
+  settleMs,
+}: { selector: string; direction: string; rounds?: number; settleMs?: number }): string => wrap(`
+  var selector = ${JSON.stringify(selector)};
+  var direction = ${JSON.stringify(direction)};
+  var requestedRounds = ${JSON.stringify(rounds ?? 1)};
+  var requestedSettle = ${JSON.stringify(settleMs ?? 350)};
+  var target = null;
+  try { target = document.querySelector(selector); }
+  catch (error) { return { ok: false, error: 'Invalid selector: ' + selector }; }
+  if (!target) return { ok: false, error: 'No element matches ' + selector };
+
+  var container = target;
+  while (container && container !== document.body && container !== document.documentElement) {
+    var style = window.getComputedStyle(container);
+    var overflow = style.overflowY;
+    if ((overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') && container.scrollHeight > container.clientHeight) break;
+    container = container.parentElement;
+  }
+  if (!container || container === document.body || container === document.documentElement) {
+    return { ok: false, error: 'No scrollable ancestor matches ' + selector };
+  }
+
+  var requested = Math.max(1, Number(requestedRounds) || 1);
+  var count = Math.min(MAX_SCROLL_ROUNDS, requested);
+  var delay = Math.min(MAX_SETTLE_MS, Math.max(0, Number(requestedSettle) || 0));
+  var heightBefore = container.scrollHeight;
+  var step = Math.max(1, Math.round(container.clientHeight * 0.85));
+  var wait = function () { return new Promise(function (resolve) { setTimeout(resolve, delay); }); };
+  var move = function () {
+    var top = container.scrollTop;
+    var maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (direction === 'down') container.scrollTo({ top: top + step, behavior: 'instant' });
+    else if (direction === 'up') container.scrollTo({ top: top - step, behavior: 'instant' });
+    else if (direction === 'top') container.scrollTo({ top: 0, behavior: 'instant' });
+    else if (direction === 'bottom') container.scrollTo({ top: maxTop, behavior: 'instant' });
+    else return false;
+    return true;
+  };
+  if (!move()) return { ok: false, error: 'Unknown scroll direction: ' + direction };
+  var roundsDone = 1;
+  var next = function () {
+    return wait().then(function () {
+      if (roundsDone >= count || direction === 'top' || direction === 'bottom') return;
+      move();
+      roundsDone += 1;
+      return next();
+    });
+  };
+  return next().then(function () {
+    var maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    var scrollTop = Math.round(container.scrollTop);
+    var result = { ok: true, selector: cssPath(container), direction: direction, requestedRounds: requested, rounds: roundsDone, scrollTop: scrollTop, maxScrollTop: Math.round(maxScrollTop), atTop: scrollTop <= 1, atBottom: scrollTop >= maxScrollTop - 1, heightBefore: heightBefore, heightAfter: container.scrollHeight, grew: container.scrollHeight > heightBefore };
+    if (requested > MAX_SCROLL_ROUNDS) result.roundsCapped = true;
+    return result;
+  });
 `);
 
 /** Properties that answer "how does this look", without dumping the whole cascade. */

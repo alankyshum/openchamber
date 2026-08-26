@@ -43,4 +43,15 @@ describe('OpenChamber control route', () => {
       directory: '/repo',
     });
   });
+
+  it('forwards read mode so the service can enforce its read allowlist', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    await request(createApp(execute))
+      .post('/api/openchamber/control')
+      .send({ action: 'browser.snapshot', input: {}, mode: 'read' })
+      .expect(200);
+    expect(execute).toHaveBeenCalledWith(
+      'browser.snapshot', {}, undefined, expect.objectContaining({ mode: 'read', signal: expect.any(AbortSignal) }),
+    );
+  });
 });

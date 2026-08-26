@@ -316,3 +316,78 @@ describe('browser capture', () => {
     expect(request).toHaveBeenCalledWith('browser.capture', { label: 'before' }, expect.anything());
   });
 });
+
+describe('browser read action validation', () => {
+  const createReadService = () => {
+    const request = vi.fn(async () => ({ ok: true }));
+    const { service } = createService({ browserControl: { request } });
+    return { service, request };
+  };
+
+  it('resolves the new actions with normalized, bounded parameters', async () => {
+    const { service, request } = createReadService();
+    await service.execute('browser.navigate', { url: 'https://example.test/path', expectedOrigin: 'https://example.test' }, undefined, { mode: 'read' });
+    expect(request).toHaveBeenCalledWith('browser.navigate', { url: 'https://example.test/path', expectedOrigin: 'https://example.test' }, expect.objectContaining({ timeoutMs: 45_000, mode: 'read' }));
+
+    await service.execute('browser.scrollWithin', { selector: '.feed', direction: 'down', rounds: 2, settleMs: 100 });
+    expect(request).toHaveBeenCalledWith('browser.scrollWithin', {
+      selector: '.feed', direction: 'down', rounds: 2, settleMs: 100,
+    }, expect.objectContaining({ timeoutMs: 20_000 }));
+
+    await service.execute('browser.extract', {
+      itemSelector: 'article',
+      fields: [{ name: 'title', from: 'text', selector: 'h2', max: 20 }],
+      max: 3,
+      includeText: true,
+    });
+    expect(request).toHaveBeenCalledWith('browser.extract', expect.objectContaining({
+      itemSelector: 'article', max: 3, includeText: true,
+    }), expect.anything());
+  });
+
+  it('redacts sensitive URL query values in browser results without changing the path', async () => {
+    const request = vi.fn(async () => ({ url: 'https://example.test/comments?post=42&access_token=secret#top', title: 'Comments' }));
+    const { service } = createService({ browserControl: { request } });
+    await expect(service.execute('browser.snapshot', {}, undefined, { mode: 'read' })).resolves.toEqual({
+      url: 'https://example.test/comments?post=42&access_token=%5BREDACTED%5D#top',
+      title: 'Comments',
+    });
+  });
+
+  it.each([
+    ['browser.navigate', { url: '/relative', expectedOrigin: 'https://example.test' }, 'absolute http(s)'],
+    ['browser.extract', { itemSelector: 'article', fields: [], extra: true }, 'does not accept field extra'],
+    ['browser.extract', { itemSelector: 'article', fields: [{ name: 'x', from: 'text', extra: true }] }, 'does not accept field extra'],
+    ['browser.extract', { itemSelector: 'article', fields: [{ name: 'x', from: 'attr', attr: 'csrf-token' }] }, 'attr is invalid'],
+    ['browser.scrollWithin', { selector: '.feed', direction: 'down', rounds: 21 }, 'rounds must be from 1 to 20'],
+    ['browser.scrollWithin', { selector: '.feed', direction: 'down', rounds: 20, settleMs: 2_000 }, 'must not exceed 15000'],
+  ])('rejects invalid %s input before waking the browser', async (action, input, message) => {
+    const { service, request } = createReadService();
+    await expect(service.execute(action, input)).rejects.toThrow(message);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(['browser.click', 'browser.type', 'browser.capture'])('rejects %s in read mode before waking the browser', async (action) => {
+    const { service, request } = createReadService();
+    await expect(service.execute(action, action === 'browser.click' ? { selector: '#x' } : {}, undefined, { mode: 'read' }))
+      .rejects.toThrow('not available in read-only browser mode');
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('does not let a read request reach the browser when mode is omitted or invalid', async () => {
+    const { service, request } = createReadService();
+    await service.execute('browser.snapshot', {});
+    expect(request).toHaveBeenCalledTimes(1);
+    await expect(service.execute('browser.click', { selector: '#x' }, undefined, { mode: 'read' })).rejects.toThrow('not available in read-only browser mode');
+  });
+
+  it.each([
+    [{ url: 'https://example.test/path' }, 'expectedOrigin is required'],
+    [{ url: 'https://example.test/path', expectedOrigin: 'https://other.test' }, 'exactly match'],
+    [{ url: 'https://example.test/path', expectedOrigin: 'https://example.test/path' }, 'exactly match'],
+  ])('requires an exact expectedOrigin for navigate', async (input, message) => {
+    const { service, request } = createReadService();
+    await expect(service.execute('browser.navigate', input, undefined, { mode: 'read' })).rejects.toThrow(message);
+    expect(request).not.toHaveBeenCalled();
+  });
+});

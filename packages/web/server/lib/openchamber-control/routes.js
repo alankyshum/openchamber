@@ -15,7 +15,8 @@ export const registerOpenChamberControlRoutes = (app, { controlService }) => {
       const input = requestInput && typeof requestInput === 'object' && !Array.isArray(requestInput)
         ? requestInput
         : {};
-      const data = await controlService.execute(action, input, req.body?.contextDirectory, { signal: controller.signal });
+      const mode = req.body?.mode === 'read' ? 'read' : 'write';
+      const data = await controlService.execute(action, input, req.body?.contextDirectory, { signal: controller.signal, mode });
       return res.json(data);
     } catch (error) {
       const controlError = asControlError(error, 'OpenChamber control action failed');

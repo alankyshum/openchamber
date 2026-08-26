@@ -131,6 +131,33 @@ describe('managed agent tool runtime', () => {
     expect(Object.keys(tool.openchamber_web.args.parameters.properties)).toContain('url');
     expect(Object.keys(tool.openchamber.args.parameters.properties)).not.toContain('url');
     expect(Object.keys(tool.openchamber.args.parameters.properties)).toContain('sessionId');
+
+    const webProperties = tool.openchamber_web.args.parameters.properties;
+    expect(webProperties.itemSelector).toEqual(expect.objectContaining({ type: 'string' }));
+    expect(webProperties.max).toEqual(expect.objectContaining({ type: 'integer', minimum: 1, maximum: 100 }));
+    expect(webProperties.rounds).toEqual(expect.objectContaining({ type: 'integer', minimum: 1, maximum: 20 }));
+    expect(webProperties.settleMs).toEqual(expect.objectContaining({ type: 'integer', minimum: 0, maximum: 2000 }));
+    expect(webProperties.fields).toEqual(expect.objectContaining({
+      type: 'array',
+      minItems: 1,
+      maxItems: 12,
+      items: expect.objectContaining({
+        type: 'object',
+        required: ['name', 'from'],
+        additionalProperties: false,
+        properties: expect.objectContaining({
+          name: expect.objectContaining({ type: 'string' }),
+          from: expect.objectContaining({
+            type: 'string',
+            enum: ['text', 'attr', 'aria', 'href', 'datetime', 'ariaPressed'],
+          }),
+        }),
+      }),
+    }));
+    expect(Object.keys(webProperties.fields.items.properties).sort()).toEqual(['attr', 'from', 'max', 'name', 'selector']);
+    for (const property of ['itemSelector', 'fields', 'max', 'includeText', 'rounds', 'settleMs']) {
+      expect(Object.hasOwn(tool.openchamber.args.parameters.properties, property)).toBe(false);
+    }
   });
 
   it('accepts inputs passed beside the action, not only inside parameters', async () => {

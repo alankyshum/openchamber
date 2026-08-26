@@ -38,10 +38,13 @@ export const OPENCHAMBER_AGENT_TOOL_ACTIONS = Object.freeze(
 
 export const OPENCHAMBER_WEB_ACTION_DEFINITIONS = Object.freeze([
   { action: 'browser.open', title: 'Open a page in the browser panel', description: 'Open url in the in-app browser panel; use it to look at the running app. Set viewport to mobile, tablet or desktop to lay the page out at that size' },
+  { action: 'browser.navigate', title: 'Navigate the open page', description: 'Navigate the existing browser tab to an absolute same-origin http(s) URL; does not open a tab' },
   { action: 'browser.snapshot', title: 'Read the open page', description: 'Read the open page: url, title, visible text, and interactive elements with the selectors the other browser actions accept. Pass selector to read only that part of a long page. Reports any errors the page logged' },
+  { action: 'browser.extract', title: 'Extract repeated page items', description: 'Read bounded structured fields from repeated elements using declarative selectors and fixed field sources; no expressions or raw HTML' },
   { action: 'browser.click', title: 'Click on the open page', description: 'Click an element; give selector, or text to match a link or button by its visible label' },
   { action: 'browser.type', title: 'Type into the open page', description: 'Type value into the field matched by selector; set submit to press Enter afterwards' },
   { action: 'browser.scroll', title: 'Scroll the open page', description: 'Scroll the page; direction is up, down, top, or bottom, or pass selector to bring one element into view' },
+  { action: 'browser.scrollWithin', title: 'Scroll an element container', description: 'Scroll the nearest scrollable ancestor of an element; direction and bounded rounds are read-only' },
   { action: 'browser.back', title: 'Go back in the browser panel', description: 'Return to the previous page in this tab; no parameters' },
   { action: 'browser.forward', title: 'Go forward in the browser panel', description: 'Move forward again in this tab; no parameters' },
   { action: 'browser.inspect', title: 'Read how an element renders', description: 'Read the computed styles of the element matched by selector — colours, fonts, spacing, borders — as the page actually renders them' },
@@ -52,6 +55,17 @@ export const OPENCHAMBER_WEB_ACTION_DEFINITIONS = Object.freeze([
 export const OPENCHAMBER_WEB_ACTIONS = Object.freeze(
   OPENCHAMBER_WEB_ACTION_DEFINITIONS.map(({ action }) => action),
 );
+
+/** Explicit, frozen capability boundary for the read-only browser surface. */
+export const OPENCHAMBER_BROWSER_READ_ACTIONS = Object.freeze([
+  'browser.open', 'browser.navigate', 'browser.snapshot', 'browser.extract',
+  'browser.scroll', 'browser.scrollWithin', 'browser.inspect',
+  'browser.back', 'browser.forward', 'browser.resize',
+]);
+
+export const OPENCHAMBER_BROWSER_MUTATING_ACTIONS = Object.freeze([
+  'browser.click', 'browser.type', 'browser.capture',
+]);
 
 /**
  * Memory is its own tool for the same reason web is: remembering across

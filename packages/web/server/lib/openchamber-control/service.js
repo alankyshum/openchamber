@@ -1,12 +1,18 @@
 import path from 'node:path';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import { OpenChamberControlError, asControlError } from './error.js';
-import { OPENCHAMBER_ALL_ACTIONS } from './actions.js';
+import { OPENCHAMBER_ALL_ACTIONS, OPENCHAMBER_BROWSER_READ_ACTIONS } from './actions.js';
 import { writeScreenshot } from './screenshots.js';
 
 const DEFAULT_WAIT_TIMEOUT_SECONDS = 600;
 const MAX_WAIT_TIMEOUT_SECONDS = 86_400;
 const WAIT_POLL_INTERVAL_MS = 500;
+const MAX_ITEMS = 100;
+const MAX_FIELDS = 12;
+const MAX_SCROLL_ROUNDS = 20;
+const MAX_SETTLE_MS = 2_000;
+const READ_ACTIONS = new Set(OPENCHAMBER_BROWSER_READ_ACTIONS);
+const SENSITIVE_URL_QUERY_PARTS = ['token', 'access_token', 'refresh_token', 'auth', 'code', 'key', 'secret', 'session', 'nonce', 'signature', 'jwt'];
 // One service, both capabilities: which tool asked is the caller's concern.
 const CONTROL_ACTIONS = new Set(OPENCHAMBER_ALL_ACTIONS);
 const SCHEDULE_TASK_ID_ACTIONS = new Set([
@@ -19,6 +25,85 @@ const asNonEmptyString = (value) => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+};
+
+const redactUrl = (value) => {
+  if (typeof value !== 'string') return value;
+  try {
+    const parsed = new URL(value);
+    for (const [name] of parsed.searchParams) {
+      if (SENSITIVE_URL_QUERY_PARTS.some((part) => name.toLowerCase().includes(part))) {
+        parsed.searchParams.set(name, '[REDACTED]');
+      }
+    }
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+};
+
+const redactBrowserResult = (result) => {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  return { ...result, ...(typeof result.url === 'string' ? { url: redactUrl(result.url) } : {}) };
+};
+
+const rejectUnknownKeys = (input, allowed, action) => {
+  for (const key of Object.keys(input)) {
+    if (!allowed.includes(key)) throw new OpenChamberControlError(`${action} does not accept field ${key}`, 400);
+  }
+};
+
+const boundedInteger = (value, fallback, field, max) => {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new OpenChamberControlError(`${field} must be from 1 to ${max}`, 400);
+  }
+  return value;
+};
+
+const boundedNonNegativeInteger = (value, fallback, field, max) => {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+    throw new OpenChamberControlError(`${field} must be from 0 to ${max}`, 400);
+  }
+  return value;
+};
+
+const validateBrowserInput = (action, input) => {
+  const contracts = {
+    'browser.open': ['url', 'viewport'], 'browser.navigate': ['url', 'expectedOrigin'],
+    'browser.snapshot': ['selector'], 'browser.extract': ['selector', 'itemSelector', 'fields', 'max', 'includeText'],
+    'browser.click': ['selector', 'text'], 'browser.type': ['selector', 'value', 'submit'],
+    'browser.scroll': ['selector', 'direction'], 'browser.scrollWithin': ['selector', 'direction', 'rounds', 'settleMs'],
+    'browser.inspect': ['selector'], 'browser.capture': ['label', 'directory'],
+    'browser.resize': ['viewport'], 'browser.back': [], 'browser.forward': [],
+  };
+  rejectUnknownKeys(input, contracts[action] || [], action);
+};
+
+const validateExtractFields = (fields) => {
+  if (!Array.isArray(fields) || fields.length < 1 || fields.length > MAX_FIELDS) {
+    throw new OpenChamberControlError(`fields must contain 1 to ${MAX_FIELDS} entries`, 400);
+  }
+  const names = new Set();
+  return fields.map((field, index) => {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) throw new OpenChamberControlError(`fields[${index}] must be an object`, 400);
+    rejectUnknownKeys(field, ['name', 'from', 'selector', 'attr', 'max'], `fields[${index}]`);
+    const name = asNonEmptyString(field.name);
+    if (!name || !/^[a-z][a-zA-Z0-9_]{0,39}$/.test(name)) throw new OpenChamberControlError(`fields[${index}].name is invalid`, 400);
+    if (names.has(name)) throw new OpenChamberControlError(`fields[${index}].name must be unique`, 400);
+    names.add(name);
+    const from = asNonEmptyString(field.from);
+    if (!['text', 'attr', 'aria', 'href', 'datetime', 'ariaPressed'].includes(from)) throw new OpenChamberControlError(`fields[${index}].from is invalid`, 400);
+    const selector = field.selector === undefined ? undefined : asNonEmptyString(field.selector);
+    if (field.selector !== undefined && !selector) throw new OpenChamberControlError(`fields[${index}].selector must be a non-empty string`, 400);
+    const attr = field.attr === undefined ? undefined : asNonEmptyString(field.attr);
+    if (from === 'attr') {
+      if (!attr || !/^[a-zA-Z][a-zA-Z0-9:_.-]{0,63}$/.test(attr) || /(token|csrf|auth|session|secret|key|nonce|signature|jwt|bearer)/i.test(attr)) throw new OpenChamberControlError(`fields[${index}].attr is invalid`, 400);
+    } else if (field.attr !== undefined) throw new OpenChamberControlError(`fields[${index}].attr is only valid with from attr`, 400);
+    const max = boundedInteger(field.max, 1_000, `fields[${index}].max`, 1_000);
+    return { name, from, ...(selector ? { selector } : {}), ...(attr ? { attr } : {}), max };
+  });
 };
 
 const positiveInteger = (value, fallback, field) => {
@@ -329,8 +414,9 @@ export const createOpenChamberControlService = (dependencies) => {
    * should come back as a usage error the agent can correct, without waking a
    * client or waiting for a round trip.
    */
-  const browserAction = async (action, input, signal, contextDirectory) => {
+  const browserAction = async (action, input, signal, contextDirectory, mode = 'write') => {
     const parameters = {};
+    validateBrowserInput(action, input);
 
     const readViewport = (required) => {
       const viewport = asNonEmptyString(input.viewport);
@@ -365,6 +451,62 @@ export const createOpenChamberControlService = (dependencies) => {
         throw new OpenChamberControlError('url must use http or https', 400);
       }
       parameters.url = parsed.toString();
+    }
+
+    if (action === 'browser.navigate') {
+      const url = asNonEmptyString(input.url);
+      if (!url) throw new OpenChamberControlError('url is required for browser.navigate', 400);
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new OpenChamberControlError('url must be an absolute http(s) URL', 400);
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new OpenChamberControlError('url must use http or https', 400);
+      }
+      const expectedOrigin = asNonEmptyString(input.expectedOrigin);
+      if (!expectedOrigin) throw new OpenChamberControlError('expectedOrigin is required for read-only browser.navigate', 400);
+      let expected;
+      try { expected = new URL(expectedOrigin); } catch { throw new OpenChamberControlError('expectedOrigin must be an origin', 400); }
+      if (expected.origin !== expectedOrigin || expected.origin !== parsed.origin) {
+        throw new OpenChamberControlError('expectedOrigin must exactly match the target URL origin', 400);
+      }
+      parameters.url = parsed.toString();
+      parameters.expectedOrigin = expected.origin;
+    }
+
+    if (action === 'browser.extract') {
+      const itemSelector = asNonEmptyString(input.itemSelector);
+      if (!itemSelector) throw new OpenChamberControlError('itemSelector is required for browser.extract', 400);
+      const selector = input.selector === undefined ? undefined : asNonEmptyString(input.selector);
+      if (input.selector !== undefined && !selector) throw new OpenChamberControlError('selector must be a non-empty string', 400);
+      if (input.includeText !== undefined && typeof input.includeText !== 'boolean') {
+        throw new OpenChamberControlError('includeText must be a boolean', 400);
+      }
+      parameters.itemSelector = itemSelector;
+      if (selector) parameters.selector = selector;
+      parameters.fields = validateExtractFields(input.fields);
+      parameters.max = boundedInteger(input.max, MAX_ITEMS, 'max', MAX_ITEMS);
+      parameters.includeText = input.includeText === true;
+    }
+
+    if (action === 'browser.scrollWithin') {
+      const selector = asNonEmptyString(input.selector);
+      const direction = asNonEmptyString(input.direction);
+      if (!selector) throw new OpenChamberControlError('selector is required for browser.scrollWithin', 400);
+      if (!['up', 'down', 'top', 'bottom'].includes(direction)) {
+        throw new OpenChamberControlError('direction must be up, down, top, or bottom', 400);
+      }
+      const rounds = boundedInteger(input.rounds, 1, 'rounds', MAX_SCROLL_ROUNDS);
+      const settleMs = boundedNonNegativeInteger(input.settleMs, 350, 'settleMs', MAX_SETTLE_MS);
+      if (rounds * settleMs > 15_000) {
+        throw new OpenChamberControlError('rounds multiplied by settleMs must not exceed 15000', 400);
+      }
+      parameters.selector = selector;
+      parameters.direction = direction;
+      parameters.rounds = rounds;
+      parameters.settleMs = settleMs;
     }
 
 
@@ -416,8 +558,8 @@ export const createOpenChamberControlService = (dependencies) => {
     // Opening a page waits for the navigation to settle, so its budget has to
     // exceed the client's own wait; sharing one timeout with the quick actions
     // made a slow page indistinguishable from an unreachable browser.
-    const timeoutMs = action === 'browser.open' ? 45_000 : 20_000;
-    const result = await browserControl.request(action, parameters, { signal, timeoutMs });
+    const timeoutMs = action === 'browser.open' || action === 'browser.navigate' ? 45_000 : 20_000;
+    const result = redactBrowserResult(await browserControl.request(action, parameters, { signal, timeoutMs, mode }));
 
     // The image is written here rather than in the renderer: the file belongs
     // beside the code it documents, and the client that took it may be on a
@@ -466,10 +608,13 @@ export const createOpenChamberControlService = (dependencies) => {
         return agentMemoryActions.execute(action, input, contextDirectory);
       }
       if (action.startsWith('browser.')) {
+        if (options.mode === 'read' && !READ_ACTIONS.has(action)) {
+          throw new OpenChamberControlError(`${action} is not available in read-only browser mode`, 403);
+        }
         if (!browserControl) {
           throw new OpenChamberControlError('The in-app browser is not available on this server', 503);
         }
-        return browserAction(action, input, options.signal, contextDirectory);
+        return browserAction(action, input, options.signal, contextDirectory, options.mode);
       }
       if (action === 'projects.list') return { projects: await projects() };
       if (action === 'models.list') return models();

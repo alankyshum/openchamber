@@ -48,3 +48,25 @@ itself; it can only ask and wait.
   and a missing one silently turns every answer into an agent-visible timeout.
 - Request payload limits are sized for a page snapshot (visible text plus every
   interactive element), not for a control message.
+
+## The read-only surface
+
+A subset of the `browser.*` actions is designated read-only and is the only part
+reachable from the `openchamber-browser` CLI: it extracts structured items,
+scrolls, and navigates, but never clicks, types, submits, or writes a file. That
+contract — the action allowlist, the declarative extraction spec and its frozen
+field-source enum, the budget caps, the result envelopes, and the redaction and
+mutation boundaries — is defined in [`docs/browser-read-cli.md`](../../../../../docs/browser-read-cli.md).
+
+Read it before adding an action or relaxing a cap. Two properties in it are
+constraints on *this* module rather than on the caller:
+
+- The read set is an explicit allowlist. A new action registered in
+  `openchamber-control/actions.js` is not read-safe until it is named there, and
+  a test asserts the read set and the mutating set stay disjoint.
+- Extraction caps are sized against the `2mb` body limit on
+  `POST /api/browser-control/result`, not just against readability. The
+  per-item caps multiply, so the extraction script also carries a total
+  character budget. Raising a cap without re-checking that product turns an
+  over-large result into a rejected body, which reaches the agent as an
+  unexplained timeout rather than as a truncated answer.

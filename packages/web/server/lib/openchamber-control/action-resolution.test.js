@@ -1,6 +1,25 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveAgentToolAction } from './actions.js';
+import {
+  OPENCHAMBER_BROWSER_MUTATING_ACTIONS,
+  OPENCHAMBER_BROWSER_READ_ACTIONS,
+  OPENCHAMBER_WEB_ACTIONS,
+  resolveAgentToolAction,
+} from './actions.js';
+
+test('browser read allowlist is explicit and excludes mutations', () => {
+  expect(OPENCHAMBER_BROWSER_READ_ACTIONS).toEqual(expect.arrayContaining([
+    'browser.open', 'browser.navigate', 'browser.snapshot', 'browser.extract',
+    'browser.scroll', 'browser.scrollWithin', 'browser.inspect',
+    'browser.back', 'browser.forward', 'browser.resize',
+  ]));
+  expect(OPENCHAMBER_BROWSER_READ_ACTIONS).not.toEqual(expect.arrayContaining([
+    'browser.click', 'browser.type', 'browser.capture',
+  ]));
+  expect(OPENCHAMBER_BROWSER_READ_ACTIONS).not.toContain('browser.future');
+  expect(OPENCHAMBER_WEB_ACTIONS).toEqual(expect.arrayContaining(OPENCHAMBER_BROWSER_READ_ACTIONS));
+  expect(OPENCHAMBER_BROWSER_READ_ACTIONS.filter((action) => OPENCHAMBER_BROWSER_MUTATING_ACTIONS.includes(action))).toEqual([]);
+});
 
 /**
  * Both cases here are from one real conversation: the model called `read` and

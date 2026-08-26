@@ -14,17 +14,19 @@
  */
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
+import { BROWSER_READ_ACTIONS } from '@/lib/browser/contract';
 
 type BrowserControlRequest = {
   readonly requestId: string;
   readonly action: string;
   readonly parameters: Record<string, unknown>;
+  readonly mode?: 'read' | 'write';
 };
 
 /** Implemented by the mounted browser pane. */
 export type BrowserController = {
   /** Runs one action and resolves with its JSON-serializable result. */
-  readonly run: (action: string, parameters: Record<string, unknown>) => Promise<unknown>;
+  readonly run: (action: string, parameters: Record<string, unknown>, mode?: 'read' | 'write') => Promise<unknown>;
 };
 
 /** Opens a URL when no browser view exists yet. */
@@ -41,6 +43,7 @@ const VIEW_ATTACH_POLL_MS = 50;
 let activeController: BrowserController | null = null;
 let opener: BrowserOpener | null = null;
 let unsubscribe: (() => void) | null = null;
+const READ_ACTIONS = new Set<string>(BROWSER_READ_ACTIONS);
 
 /**
  * Delivers a result to the server.
@@ -162,7 +165,10 @@ const handleRequest = async (request: BrowserControlRequest): Promise<void> => {
       return;
     }
 
-    const data = await controller!.run(request.action, request.parameters);
+    if (request.mode === 'read' && !READ_ACTIONS.has(request.action)) {
+      throw new Error(`${request.action} is not available in read-only browser mode`);
+    }
+    const data = await controller!.run(request.action, request.parameters, request.mode);
     await postResult(request.requestId, { ok: true, data });
   } catch (error) {
     await postResult(request.requestId, {
@@ -176,11 +182,12 @@ const ensureSubscribed = (): void => {
   if (unsubscribe) return;
   unsubscribe = subscribeOpenchamberEvents((event) => {
     if (event.type !== 'browser-control-request') return;
-    void handleRequest({
+      void handleRequest({
       requestId: event.requestId,
       action: event.action,
-      parameters: event.parameters,
-    });
+        parameters: event.parameters,
+        mode: event.mode === 'read' ? 'read' : 'write',
+      });
   });
 };
 

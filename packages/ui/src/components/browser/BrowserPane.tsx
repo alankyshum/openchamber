@@ -27,8 +27,10 @@ import {
 } from '@/lib/browser/devTunnel';
 import {
   buildClickScript,
+  buildExtractScript,
   buildInspectScript,
   buildScrollScript,
+  buildScrollWithinScript,
   buildSnapshotScript,
   buildTypeScript,
 } from '@/lib/browser/pageActions';
@@ -45,6 +47,7 @@ import {
 import { BrowserEmptyState } from './BrowserEmptyState';
 import { useAnnotationAttach, useAnnotationOverlayLabels } from './useAnnotationAttach';
 import { readEventPayload, useWebviewNavigation } from './useWebviewNavigation';
+import { BROWSER_READ_ACTIONS } from '@/lib/browser/contract';
 
 export type BrowserPaneProps = {
   initialUrl: string;
@@ -308,9 +311,13 @@ const WebviewBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tab
   const runControlAction = React.useCallback(async (
     action: string,
     parameters: Record<string, unknown>,
+    mode: 'read' | 'write' = 'write',
   ): Promise<unknown> => {
     const webview = webviewRef.current;
     if (!webview) throw new Error('The browser panel is not ready');
+    if (mode === 'read' && !BROWSER_READ_ACTIONS.includes(action as typeof BROWSER_READ_ACTIONS[number])) {
+      throw new Error(`${action} is not available in read-only browser mode`);
+    }
 
     // Showing the bar when the agent sizes the page keeps the change visible:
     // the user should see which layout is being looked at, not just that it
@@ -388,6 +395,47 @@ const WebviewBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tab
       };
     }
 
+    if (action === 'browser.navigate') {
+      const url = typeof parameters.url === 'string' ? parameters.url : '';
+      if (!url) throw new Error('url is required');
+      let target: URL;
+      let current: URL;
+      try {
+        target = new URL(url);
+        // Compare in display/original URL space. A remote loopback page may be
+        // loaded through an ephemeral local tunnel origin internally.
+        current = new URL(toDisplayUrl(webview.getURL()));
+      } catch {
+        throw new Error('browser.navigate requires an existing http(s) page');
+      }
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        throw new Error('browser.navigate requires an http(s) URL');
+      }
+      if (target.origin !== current.origin) {
+        throw new Error('browser.navigate must stay on the current page origin');
+      }
+      if (typeof parameters.expectedOrigin !== 'string' || parameters.expectedOrigin !== target.origin) {
+        throw new Error('browser.navigate expectedOrigin must match the target page origin');
+      }
+      const resolved = await resolveBrowsableUrl(url);
+      webview.loadURL(resolved);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const settled = await waitForIdle(25_000);
+      const actualUrl = toDisplayUrl(webview.getURL());
+      let actualOrigin = '';
+      try { actualOrigin = new URL(actualUrl).origin; } catch { /* reported below */ }
+      if (actualOrigin !== target.origin) {
+        try { if (webview.canGoBack()) webview.goBack(); } catch { /* best effort recovery */ }
+        throw new Error(`browser.navigate rejected cross-origin redirect to ${actualOrigin || 'an invalid URL'}`);
+      }
+      return {
+        url: actualUrl,
+        title: webview.getTitle() || '',
+        navigated: true,
+        settled,
+      };
+    }
+
     await waitForIdle();
 
     const asOptionalString = (value: unknown): string | undefined => (
@@ -398,6 +446,14 @@ const WebviewBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tab
       switch (action) {
         case 'browser.snapshot':
           return buildSnapshotScript({ selector: asOptionalString(parameters.selector) });
+        case 'browser.extract':
+          return buildExtractScript({
+            selector: asOptionalString(parameters.selector),
+            itemSelector: String(parameters.itemSelector ?? ''),
+            fields: Array.isArray(parameters.fields) ? parameters.fields as Array<{ name: string; from: string; selector?: string; attr?: string; max?: number }> : [],
+            max: typeof parameters.max === 'number' ? parameters.max : undefined,
+            includeText: parameters.includeText === true,
+          });
         case 'browser.click':
           return buildClickScript({
             selector: asOptionalString(parameters.selector),
@@ -415,6 +471,13 @@ const WebviewBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tab
           return buildScrollScript({
             selector: asOptionalString(parameters.selector),
             direction: asOptionalString(parameters.direction),
+          });
+        case 'browser.scrollWithin':
+          return buildScrollWithinScript({
+            selector: String(parameters.selector ?? ''),
+            direction: String(parameters.direction ?? ''),
+            rounds: typeof parameters.rounds === 'number' ? parameters.rounds : undefined,
+            settleMs: typeof parameters.settleMs === 'number' ? parameters.settleMs : undefined,
           });
         default:
           return null;

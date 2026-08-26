@@ -30,10 +30,33 @@ const AGENT_TOOL_ACTION_TITLES = Object.fromEntries(
  * on every call.
  */
 const WEB_PARAMETER_NAMES = ['url', 'selector', 'text', 'value', 'submit', 'direction', 'viewport', 'label'];
+const BROWSER_READ_PARAMETER_NAMES = ['itemSelector', 'fields', 'max', 'includeText', 'rounds', 'settleMs'];
 // `title` is shared with the control tool, so it is not listed here — only the
 // names memory alone introduces are kept out of the other schemas.
 const MEMORY_ONLY_PARAMETER_NAMES = ['body', 'scope', 'memoryId', 'type'];
 const MEMORY_PARAMETER_NAMES = [...MEMORY_ONLY_PARAMETER_NAMES, 'title'];
+
+const BROWSER_EXTRACT_FIELD_SOURCES = Object.freeze([
+  'text',
+  'attr',
+  'aria',
+  'href',
+  'datetime',
+  'ariaPressed',
+]);
+
+const BROWSER_EXTRACT_FIELD = Object.freeze({
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: 'Field name; start with a lowercase letter and use only letters, numbers, and underscores' },
+    from: { type: 'string', enum: BROWSER_EXTRACT_FIELD_SOURCES, description: 'Fixed source to read from the matched element' },
+    selector: { type: 'string', description: 'Optional selector relative to the repeated item' },
+    attr: { type: 'string', description: "Attribute name; required only when from is 'attr'" },
+    max: { type: 'integer', minimum: 1, maximum: 1000, description: 'Maximum characters to return for this field' },
+  },
+  required: ['name', 'from'],
+  additionalProperties: false,
+});
 
 /**
  * `title` is shared with the control tool, where it means a session title, so
@@ -87,6 +110,12 @@ const ALL_PARAMETER_PROPERTIES = {
   direction: { type: 'string', enum: ['up', 'down', 'top', 'bottom'], description: 'Scroll direction for browser.scroll' },
   viewport: { type: 'string', enum: ['mobile', 'tablet', 'desktop', 'fill'], description: 'Page layout size; snapshots report which one is in effect' },
   label: { type: 'string', description: 'Short name for a browser.capture image, such as before-fix' },
+  itemSelector: { type: 'string', description: 'Required selector; each matching element becomes one extracted item' },
+  fields: { type: 'array', minItems: 1, maxItems: 12, items: BROWSER_EXTRACT_FIELD, description: 'Required declarative fields to read from each extracted item' },
+  max: { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum number of repeated items to return' },
+  includeText: { type: 'boolean', description: 'Include each extracted item’s innerText' },
+  rounds: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum number of container scroll rounds' },
+  settleMs: { type: 'integer', minimum: 0, maximum: 2000, description: 'Milliseconds to wait after each container scroll round' },
   body: { type: 'string', description: 'Full text of the memory; state it so it still makes sense in a session that has none of this conversation' },
   scope: { type: 'string', enum: ['global', 'project', 'both'], description: 'global is about the user and applies everywhere; project is about this codebase. both is only valid for memory.list' },
   memoryId: { type: 'string', description: 'Memory ID from a memory.list or memory.read result' },
@@ -99,10 +128,12 @@ const pickParameters = (names) => Object.fromEntries(
 
 const CONTROL_PARAMETER_PROPERTIES = pickParameters(
   Object.keys(ALL_PARAMETER_PROPERTIES).filter((name) => (
-    !WEB_PARAMETER_NAMES.includes(name) && !MEMORY_ONLY_PARAMETER_NAMES.includes(name)
+    !WEB_PARAMETER_NAMES.includes(name)
+    && !BROWSER_READ_PARAMETER_NAMES.includes(name)
+    && !MEMORY_ONLY_PARAMETER_NAMES.includes(name)
   )),
 );
-const WEB_PARAMETER_PROPERTIES = pickParameters(WEB_PARAMETER_NAMES);
+const WEB_PARAMETER_PROPERTIES = pickParameters([...WEB_PARAMETER_NAMES, ...BROWSER_READ_PARAMETER_NAMES]);
 const MEMORY_PARAMETER_PROPERTIES = {
   ...pickParameters(MEMORY_PARAMETER_NAMES),
   ...MEMORY_PARAMETER_OVERRIDES,
