@@ -1,10 +1,43 @@
 import { describe, expect, mock, test } from 'bun:test';
 
+type SanitizeAttribute = {
+  attrName: string;
+  attrValue: string;
+  forceKeepAttr?: boolean;
+};
+
+class TestAnchorElement {
+  target = '';
+
+  setAttribute(name: string, value: string): void {
+    if (name === 'target') this.target = value;
+  }
+}
+
+const sanitizeHooks: {
+  uponSanitizeAttribute?: (node: unknown, data: SanitizeAttribute) => void;
+  afterSanitizeAttributes?: (node: unknown) => void;
+} = {};
+
+Object.assign(globalThis, {
+  window: {},
+  HTMLAnchorElement: TestAnchorElement,
+});
+
 mock.module('dompurify', () => ({
   default: {
     isSupported: true,
-    addHook: () => undefined,
-    sanitize: (html: string) => html,
+    addHook: (name: keyof typeof sanitizeHooks, hook: never) => {
+      sanitizeHooks[name] = hook;
+    },
+    sanitize: (html: string) => html.replace(/ href="([^"]*)"/g, (attribute, href: string) => {
+      const anchor = new TestAnchorElement();
+      const data: SanitizeAttribute = { attrName: 'href', attrValue: href };
+      sanitizeHooks.uponSanitizeAttribute?.(anchor, data);
+      sanitizeHooks.afterSanitizeAttributes?.(anchor);
+
+      return data.forceKeepAttr || /^(?:https?|mailto|tel):/i.test(href) ? attribute : '';
+    }),
   },
 }));
 mock.module('./markdown-worker', () => ({
@@ -16,7 +49,10 @@ import { escapeRawMarkdownHtml, isLocalFileUrl, MARKDOWN_FORBIDDEN_TAGS } from '
 const {
   __markdownImageCandidateCacheForTests,
   extractMarkdownImageCandidates,
+  getCachedMarkdownBlocks,
+  renderMarkdownBlocks,
   renderMarkdownSync,
+  resetMarkdownHtmlCacheForTests,
 } = await import('./markdownCore');
 const { resolveMarkdownImageSource } = await import('./markdownImageAssets');
 
@@ -39,6 +75,62 @@ describe('markdown sanitization', () => {
     expect(isLocalFileUrl('file://localhost/private/tmp/REPORT.md')).toBe(true);
     expect(isLocalFileUrl('file://remote-host/share/report.html')).toBe(false);
     expect(isLocalFileUrl('javascript:alert(1)')).toBe(false);
+  });
+
+  test('keeps app and local file links while stripping blocked schemes', () => {
+    const html = renderMarkdownSync([
+      '[app](obsidian://open?vault=Notebook)',
+      '[file](file:///workspace/notes.md)',
+      '[script](javascript:alert(1))',
+      '[diagnostic](ms-msdt:/id%20PCWDiagnostic)',
+    ].join('\n\n'), 'inline');
+
+    expect(html).toContain('href="obsidian://open?vault=Notebook"');
+    expect(html).toContain('href="file:///workspace/notes.md"');
+    expect(html).not.toContain('href="javascript:alert(1)"');
+    expect(html).not.toContain('href="ms-msdt:/id%20PCWDiagnostic"');
+  });
+
+});
+
+describe('Markdown block cache reads', () => {
+  test('returns all settled blocks synchronously after a full cache hit', async () => {
+    resetMarkdownHtmlCacheForTests();
+    const text = '**cached** settled markdown';
+
+    expect(getCachedMarkdownBlocks(text)).toBeNull();
+    const rendered = await renderMarkdownBlocks(text, false);
+
+    expect(getCachedMarkdownBlocks(text)).toEqual(rendered);
+  });
+
+  test('returns null for a cold or partial settled miss', async () => {
+    resetMarkdownHtmlCacheForTests();
+    const first = 'first settled block';
+    const changed = 'first settled block\n\nsecond settled block';
+
+    await renderMarkdownBlocks(first, false);
+
+    expect(getCachedMarkdownBlocks(changed)).toBeNull();
+  });
+
+  test('keeps image mode identity out of the settled full hit', async () => {
+    resetMarkdownHtmlCacheForTests();
+    const text = '![image](https://example.test/image.png)';
+
+    await renderMarkdownBlocks(text, false, 'inline');
+
+    expect(getCachedMarkdownBlocks(text, 'label')).toBeNull();
+    expect(getCachedMarkdownBlocks(text, 'inline')).not.toBeNull();
+  });
+
+  test('does not treat streaming live-cache entries as settled full hits', async () => {
+    resetMarkdownHtmlCacheForTests();
+    const text = 'streaming markdown';
+
+    await renderMarkdownBlocks(text, true);
+
+    expect(getCachedMarkdownBlocks(text)).toBeNull();
   });
 });
 

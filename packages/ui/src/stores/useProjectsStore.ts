@@ -60,6 +60,7 @@ interface ProjectsStore {
     color?: string | null;
     iconBackground?: string | null;
     defaultModel?: string | null;
+    defaultVariant?: string | null;
   }) => void;
   uploadProjectIcon: (id: string, file: File) => Promise<{ ok: boolean; error?: string }>;
   removeProjectIcon: (id: string) => Promise<{ ok: boolean; error?: string }>;
@@ -291,6 +292,10 @@ const sanitizeProjects = (value: unknown): ProjectEntry[] => {
     const defaultModel = normalizeDefaultModel(candidate.defaultModel);
     if (defaultModel) {
       project.defaultModel = defaultModel;
+      // A variant only means something next to the model it belongs to.
+      if (typeof candidate.defaultVariant === 'string' && candidate.defaultVariant.trim().length > 0) {
+        project.defaultVariant = candidate.defaultVariant.trim();
+      }
     }
     if (candidate.iconBackground === null) {
       project.iconBackground = null;
@@ -352,13 +357,7 @@ const readPersistedActiveProjectId = (): string | null => {
   return null;
 };
 
-const cacheProjects = (projects: ProjectEntry[], activeProjectId: string | null) => {
-  try {
-    safeStorage.setItem(getProjectsStorageKey(), JSON.stringify(projects));
-  } catch {
-    // ignored
-  }
-
+const cacheActiveProjectId = (activeProjectId: string | null) => {
   try {
     const activeProjectStorageKey = getActiveProjectStorageKey();
     if (activeProjectId) {
@@ -369,6 +368,15 @@ const cacheProjects = (projects: ProjectEntry[], activeProjectId: string | null)
   } catch {
     // ignored
   }
+};
+
+const cacheProjects = (projects: ProjectEntry[], activeProjectId: string | null) => {
+  try {
+    safeStorage.setItem(getProjectsStorageKey(), JSON.stringify(projects));
+  } catch {
+    // ignored
+  }
+  cacheActiveProjectId(activeProjectId);
 };
 
 const persistProjects = (projects: ProjectEntry[], activeProjectId: string | null, manualOrder?: string[]) => {
@@ -521,6 +529,7 @@ const vscodeWorkspaceProjectsEqual = (left: ProjectEntry[], right: ProjectEntry[
       && leftProject.color === rightProject.color
       && leftProject.iconBackground === rightProject.iconBackground
       && leftProject.defaultModel === rightProject.defaultModel
+      && leftProject.defaultVariant === rightProject.defaultVariant
       && leftProject.addedAt === rightProject.addedAt
       && leftProject.lastOpenedAt === rightProject.lastOpenedAt
       && leftProject.sidebarCollapsed === rightProject.sidebarCollapsed
@@ -687,18 +696,13 @@ export const useProjectsStore = create<ProjectsStore>()(
       if (activeProjectId === id) {
         return;
       }
-      const target = projects.find((project) => project.id === id);
-      if (!target) {
+      if (!projects.some((project) => project.id === id)) {
         return;
       }
 
-      const now = Date.now();
-      const nextProjects = projects.map((project) =>
-        project.id === id ? { ...project, lastOpenedAt: now } : project
-      );
-
-      set({ projects: nextProjects, activeProjectId: id });
-      persistProjects(nextProjects, id, get().manualProjectOrder);
+      set({ activeProjectId: id });
+      cacheActiveProjectId(id);
+      void updateDesktopSettings({ activeProjectId: id });
     },
 
     renameProject: (id: string, label: string) => {
@@ -724,6 +728,7 @@ export const useProjectsStore = create<ProjectsStore>()(
       color?: string | null;
       iconBackground?: string | null;
       defaultModel?: string | null;
+      defaultVariant?: string | null;
     }) => {
       if (isVSCodeProjectsRuntime) {
         return;
@@ -748,6 +753,19 @@ export const useProjectsStore = create<ProjectsStore>()(
           } else {
             delete updated.defaultModel;
           }
+        }
+        if (meta.defaultVariant !== undefined) {
+          const trimmed = meta.defaultVariant?.trim();
+          if (trimmed) {
+            updated.defaultVariant = trimmed;
+          } else {
+            delete updated.defaultVariant;
+          }
+        }
+        // A variant without its model is meaningless, and the model may have
+        // just been cleared in this same update.
+        if (!updated.defaultModel) {
+          delete updated.defaultVariant;
         }
         return updated;
       });
