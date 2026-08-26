@@ -94,7 +94,7 @@ async function createUiSessionCookie(port, password, timeoutMs) {
 }
 
 function getDesktopLocalAuthHeader(port, requestHeaders) {
-  if (requestHeaders.Authorization || requestHeaders.authorization) {
+  if (Object.keys(requestHeaders).some((name) => name.toLowerCase() === 'authorization')) {
     return null;
   }
   const desktopPort = readDesktopLocalPortFromSettings();
@@ -103,6 +103,13 @@ function getDesktopLocalAuthHeader(port, requestHeaders) {
   }
   const token = readDesktopLocalClientTokenFromSettings();
   return token ? `Bearer ${token}` : null;
+}
+
+function hasCredentialHeaders(headers) {
+  return Object.keys(headers).some((name) => {
+    const lowerName = name.toLowerCase();
+    return lowerName === 'authorization' || lowerName === 'cookie';
+  });
 }
 
 async function requestServerShutdown(port, hostOverride) {
@@ -150,8 +157,7 @@ async function requestJson(port, endpoint, options = {}) {
     // An explicitly selected server is untrusted until proven local. Never let
     // a token, desktop credential, or session password turn an arbitrary URL
     // into a credential sink (this also covers OPENCHAMBER_URL).
-    const hasCredential = Boolean(requestHeaders.Authorization || requestHeaders.authorization
-      || requestHeaders.Cookie || requestHeaders.cookie
+    const hasCredential = Boolean(hasCredentialHeaders(requestHeaders)
       || options.uiPassword || options.token || process.env.OPENCHAMBER_TOKEN);
     if (hasCredential && !isTrustedAuthOrigin(requestUrl)) {
       throw new Error('Refusing to send credentials to an untrusted server; use a trusted loopback or desktop origin.');
@@ -167,6 +173,12 @@ async function requestJson(port, endpoint, options = {}) {
     }
     const body = await response.json().catch(() => null);
     if (response.status === 401 && body?.error === 'UI authentication required') {
+      // The session-minting request and the retry both carry credentials. Do
+      // not mint a local session or send its cookie in response to an
+      // off-policy server's 401.
+      if (!isTrustedAuthOrigin(requestUrl)) {
+        return { response, body };
+      }
       const uiPassword = await resolveUiPasswordForPort(port, options);
       const cookie = await createUiSessionCookie(port, uiPassword, timeoutMs);
       if (cookie) {
