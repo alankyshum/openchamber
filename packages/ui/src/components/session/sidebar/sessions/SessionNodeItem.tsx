@@ -26,7 +26,7 @@ import { useGlobalSessionStatus, useSessionPermissions, useSessionQuestionCount 
 import { useSessionMessageRecordsForExport } from '@/sync/use-sync';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
 import { DraggableSessionRow } from '../folders/sessionFolderDnd';
-import { canShowSessionWorktreeMenu, getSessionWorktreeMenuDisabled, nodeContainsSessionId, nodeHasPinnedMembershipChange, selectQuestionBadgeSessionScopes, selectRowBadgeVisibilityClass } from './sessionNodeItemUtils';
+import { canShowSessionWorktreeMenu, getSessionWorktreeMenuDisabled, isSessionActiveInContextPanel, nodeContainsSessionId, nodeHasPinnedMembershipChange, selectQuestionBadgeSessionScopes, selectRowBadgeVisibilityClass } from './sessionNodeItemUtils';
 import type { SessionNode } from '../types';
 import { formatProjectLabel, formatSessionCompactDateLabel, formatSessionDateLabel, normalizePath, renderHighlightedText } from '../utils';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -55,13 +55,14 @@ import {
 import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
-import { useUIStore } from '@/stores/useUIStore';
+import { normalizeContextPanelDirectoryKey, useUIStore } from '@/stores/useUIStore';
 import type { WorktreeMetadata } from '@/types/worktree';
 import {
   getSessionWorktreeMenuState,
   type SessionWorktreeMenuTarget,
   type StartSessionWorktreeMenuLoadResult,
 } from '../sessionWorktreeMenu';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 
 type SecondaryMeta = {
   projectLabel?: string | null;
@@ -401,6 +402,14 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const isActive = useSessionUIStore((state) => state.currentSessionId === session.id);
 
   const sessionDirectory = normalizePath(session.directory ?? null) ?? normalizePath(groupDirectory ?? null);
+  const effectiveDirectory = useEffectiveDirectory();
+  const isActiveInContextPanel = useUIStore(
+    React.useCallback((state) => {
+      if (!effectiveDirectory) return false;
+      const directoryKey = normalizeContextPanelDirectoryKey(effectiveDirectory);
+      return isSessionActiveInContextPanel(state.contextPanelByDirectory[directoryKey], session.id);
+    }, [effectiveDirectory, session.id]),
+  );
   // Multi-select scope: sessions are flat per project, so selection groups by
   // project (falling back to the directory when no project is known) — a
   // selection must survive mixing sessions from different worktrees.
@@ -984,7 +993,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
         {isPinnedSession ? <Icon name="unpin" className="mr-1 h-4 w-4" /> : <Icon name="pushpin" className="mr-1 h-4 w-4" />}
         {isPinnedSession ? t('sessions.sidebar.session.menu.unpin') : t('sessions.sidebar.session.menu.pin')}
       </Item>
-      {!isActive ? (
+      {!isActive && !isActiveInContextPanel ? (
         unseenCount > 0 ? (
           <Item onClick={() => markSessionViewed(session.id)} className="[&>svg]:mr-1">
             <Icon name="checkbox-circle" className="mr-1 h-4 w-4" />
