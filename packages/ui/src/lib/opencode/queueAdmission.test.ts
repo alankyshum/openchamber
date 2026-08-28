@@ -2,13 +2,14 @@ import { describe, expect, test, mock, beforeEach } from 'bun:test';
 
 const defaultResponse = () => Response.json({ data: { admittedSeq: 1, id: 'msg_test', sessionID: 'ses_test', delivery: 'queue', timeCreated: 1, prompt: { text: 'hello' } } });
 let nextResponse: (() => Response | Promise<Response>) = defaultResponse;
+let runtimeKey = 'runtime-test';
 const runtimeFetchCalls: unknown[][] = [];
 const runtimeFetchMock = mock(async (...args: unknown[]) => {
   runtimeFetchCalls.push(args);
   return nextResponse();
 });
 mock.module('@/lib/runtime-fetch', () => ({ runtimeFetch: runtimeFetchMock }));
-mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => 'runtime-test' }));
+mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => runtimeKey }));
 mock.module('@/lib/opencode/client', () => ({ opencodeClient: { normalizeAttachmentForAdmission: async (file: { mime: string; filename?: string; url: string }) => {
   if (file.mime === 'image/heic') return { mime: 'image/jpeg', filename: file.filename?.replace(/\.heic$/i, '.jpg'), url: 'data:image/jpeg;base64,converted' };
   if (file.mime.startsWith('text/')) return { mime: 'text/plain', filename: file.filename, url: file.url.replace(/^data:[^;,]+/, 'data:text/plain') };
@@ -21,7 +22,7 @@ import { createContextPart } from '@/lib/messages/contextParts';
 const input = { runtimeKey: 'runtime-test', sessionId: 'ses_test', directory: '/repo', text: 'hello', agentMentionName: 'worker', clientMessageId: 'msg_test' };
 
 describe('durable queue admission', () => {
-  beforeEach(() => { nextResponse = defaultResponse; runtimeFetchCalls.length = 0; clearQueueAdmissionCapabilityCache(); });
+  beforeEach(() => { nextResponse = defaultResponse; runtimeKey = 'runtime-test'; runtimeFetchCalls.length = 0; clearQueueAdmissionCapabilityCache(); });
 
   test('pins the v2 endpoint and exact payload shape', async () => {
     const result = await admitToDurableQueue(input);
@@ -61,6 +62,48 @@ describe('durable queue admission', () => {
       expect(result.acknowledgement.id).toBe('msg_test');
       expect(result.acknowledgement.timeCreated).toBe(42);
     }
+  });
+
+  test('preserves a valid acknowledgement after a runtime switch so retry keeps its idempotency key', async () => {
+    nextResponse = () => {
+      runtimeKey = 'runtime-next';
+      // The production endpoint-change event increments this same generation.
+      // Tests run without a DOM, so use the exported reset directly.
+      clearQueueAdmissionCapabilityCache();
+      return defaultResponse();
+    };
+
+    const result = await admitToDurableQueue(input);
+
+    if (result.outcome !== 'admitted') throw result.error;
+    expect(result.outcome).toBe('admitted');
+    expect(runtimeFetchCalls).toHaveLength(1);
+    if (result.outcome === 'admitted') expect(result.acknowledgement.id).toBe(input.clientMessageId);
+  });
+
+  test('keeps an unverifiable OK response ambiguous after a runtime switch', async () => {
+    nextResponse = () => {
+      runtimeKey = 'runtime-next';
+      clearQueueAdmissionCapabilityCache();
+      return new Response('<html>unknown</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+    };
+
+    expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
+    expect(runtimeFetchCalls).toHaveLength(1);
+  });
+
+  test('does not restore a stale unsupported verdict after a runtime switch', async () => {
+    nextResponse = () => {
+      runtimeKey = 'runtime-next';
+      clearQueueAdmissionCapabilityCache();
+      return new Response('method not allowed', { status: 405 });
+    };
+
+    expect((await admitToDurableQueue(input)).outcome).toBe('ambiguous');
+    runtimeKey = 'runtime-test';
+    nextResponse = defaultResponse;
+    expect((await admitToDurableQueue(input)).outcome).toBe('admitted');
+    expect(runtimeFetchCalls).toHaveLength(2);
   });
 
   test('does not retry or throw on an ambiguous transport error', async () => {

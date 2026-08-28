@@ -150,6 +150,24 @@ describe('durable queue event reconciliation', () => {
     expect(fetchCalls).toHaveLength(0)
     expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([])
   })
+
+  test('starts a fresh replay after an aborted caller switches away and back', async () => {
+    let resolveFirst!: (response: Response) => void
+    const controller = new AbortController()
+    responses = [
+      new Promise<Response>((resolve) => { resolveFirst = resolve }),
+      Response.json({ data: [admitted('msg_fresh', 1, 'fresh')], hasMore: false }),
+    ]
+
+    const staleReplay = replayDurableQueueHistory(target, controller.signal)
+    controller.abort()
+    const freshReplay = replayDurableQueueHistory(target)
+    resolveFirst(Response.json({ data: [admitted('msg_stale', 1, 'stale')], hasMore: false }))
+    await Promise.all([staleReplay, freshReplay])
+
+    expect(fetchCalls).toHaveLength(2)
+    expect(useMessageQueueStore.getState().getQueueForTarget(target).map((item) => item.clientMessageId)).toEqual(['msg_fresh'])
+  })
   test('upserts and deduplicates by the exact messageID', () => {
     applyDurableQueueEvent(target, admitted('msg_exact', 4, 'first'))
     applyDurableQueueEvent(target, admitted('msg_exact', 4, 'first'))
@@ -309,4 +327,33 @@ describe('durable queue event reconciliation', () => {
     expect((fetchCalls[0]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
     expect((fetchCalls[1]?.[1] as { query?: unknown }).query).toEqual({ directory: '/repo' })
   })
+
+  test('caches an explicitly unsupported history route per runtime, expires it, and resets on runtime change', async () => {
+    const originalNow = Date.now
+    let now = 1_000
+    Date.now = () => now
+    try {
+      responses = [new Response('not implemented', { status: 501 }), Response.json({ data: [], hasMore: false })]
+      await replayDurableQueueHistory(target)
+      await replayDurableQueueHistory(target)
+      expect(fetchCalls).toHaveLength(1)
+
+      const otherRuntime = createMessageQueueTarget('ses-1', '/repo', 'runtime-b')!
+      await replayDurableQueueHistory(otherRuntime)
+      expect(fetchCalls).toHaveLength(2)
+
+      now += 5 * 60 * 1000
+      responses = [Response.json({ data: [], hasMore: false })]
+      await replayDurableQueueHistory(target)
+      expect(fetchCalls).toHaveLength(3)
+
+      resetDurableQueueCursors()
+      responses = [Response.json({ data: [], hasMore: false })]
+      await replayDurableQueueHistory(target)
+      expect(fetchCalls).toHaveLength(4)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
 })

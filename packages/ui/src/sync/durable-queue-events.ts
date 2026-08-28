@@ -22,10 +22,12 @@ const replayControllers = new Map<string, AbortController>()
 type ReplayGeneration = { invalidated: boolean; complete: boolean }
 const replayGenerations = new Map<string, ReplayGeneration>()
 const initializedHistory = new Set<string>()
+const unsupportedHistoryRuntimes = new Map<string, number>()
 const MAX_CURSOR_ENTRIES = 100
 const MAX_IN_FLIGHT_REPLAYS = 100
 const MAX_REPLAY_GENERATIONS = 100
 const HISTORY_TIMEOUT_MS = 15_000
+const UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1000
 
 const propsOf = (event: DurableEvent): Record<string, unknown> =>
   (event.data ?? event.properties) && typeof (event.data ?? event.properties) === 'object' && !Array.isArray(event.data ?? event.properties)
@@ -105,8 +107,24 @@ export const applyDurableQueueEvent = (target: MessageQueueTarget, event: Durabl
 export async function replayDurableQueueHistory(target: MessageQueueTarget, signal?: AbortSignal): Promise<void> {
   const key = queueKey(target)
   const previous = inFlight.get(key)
-  if (previous) return previous
+  const previousController = replayControllers.get(key)
+  const previousGeneration = replayGenerations.get(key)
+  if (previous && previousController && !previousController.signal.aborted && !previousGeneration?.invalidated) return previous
+  if (previous) {
+    // An aborted caller or invalidation must not make a later mount share its
+    // dead replay. Mark its generation before dropping handles so a response
+    // already in flight cannot commit into the new caller's lifecycle.
+    if (previousGeneration) previousGeneration.invalidated = true
+    previousController?.abort()
+    inFlight.delete(key)
+    replayControllers.delete(key)
+  }
   if (signal?.aborted) return
+  const unsupportedAt = unsupportedHistoryRuntimes.get(target.runtimeKey)
+  if (unsupportedAt !== undefined) {
+    if (Date.now() - unsupportedAt < UNSUPPORTED_CACHE_TTL_MS) return
+    unsupportedHistoryRuntimes.delete(target.runtimeKey)
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
   const abort = () => controller.abort()
@@ -130,7 +148,14 @@ export async function replayDurableQueueHistory(target: MessageQueueTarget, sign
           : { directory: target.directory, after: String(pageAfter) }, signal: controller.signal,
       })
       if (replayGenerations.get(key) !== generation || generation.invalidated || controller.signal.aborted) return
-      if (!response.ok) return
+      if (!response.ok) {
+        // Cache only stable route/capability rejections. 4xx authorization,
+        // session, and validation failures remain observable and retryable.
+        if (response.status === 405 || response.status === 501) {
+          unsupportedHistoryRuntimes.set(target.runtimeKey, Date.now())
+        }
+        return
+      }
       const result = await response.json() as { data?: unknown; hasMore?: unknown }
       const events = Array.isArray(result.data) ? result.data : []
       let pageNext = pageAfter
@@ -184,6 +209,7 @@ export const resetDurableQueueCursors = (): void => {
   for (const controller of replayControllers.values()) controller.abort()
   cursors.clear()
   initializedHistory.clear()
+  unsupportedHistoryRuntimes.clear()
   inFlight.clear()
   replayControllers.clear()
   replayGenerations.clear()

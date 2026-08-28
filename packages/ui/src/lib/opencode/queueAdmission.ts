@@ -20,6 +20,9 @@ const UNSUPPORTED_CACHE_TTL_MS = 5 * 60 * 1000;
 const ADMISSION_TIMEOUT_MS = 15_000;
 const inFlightAdmissions = new Map<string, Promise<QueueAdmissionResult>>();
 
+const isCurrentAdmissionRuntime = (input: QueueAdmissionInput, requestGeneration: number): boolean =>
+  requestGeneration === runtimeGeneration && input.runtimeKey === getRuntimeKey();
+
 const readResponseBody = async <T>(
   read: () => Promise<T>,
   signal: AbortSignal | null,
@@ -149,7 +152,7 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
     const error = cause instanceof Error ? cause : new Error(String(cause));
     return { outcome: 'failed', error };
   }
-  if (requestGeneration !== runtimeGeneration || input.runtimeKey !== getRuntimeKey()) {
+  if (!isCurrentAdmissionRuntime(input, requestGeneration)) {
     return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
   }
   let response: Response;
@@ -163,11 +166,16 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
       ...(controller ? { signal: controller.signal } : {}),
     });
     if (response.ok) {
-      if (requestGeneration !== runtimeGeneration || input.runtimeKey !== getRuntimeKey()) {
-        return { outcome: 'failed', error: new Error('Message was not admitted because the runtime changed.') };
-      }
+      // Once the server has acknowledged the request, a runtime switch cannot
+      // make that write un-happen. Keep a self-validating acknowledgement so
+      // callers do not retry the same idempotency key and create duplicate
+      // queue work. An unreadable acknowledgement remains ambiguous instead.
+      const runtimeChanged = !isCurrentAdmissionRuntime(input, requestGeneration);
       const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
       if (!contentType.includes('application/json')) {
+        if (runtimeChanged) {
+          return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(new Error('Durable queue response could not be verified after the runtime changed')) };
+        }
         unsupportedRuntimes.set(input.runtimeKey, Date.now());
         return { outcome: 'unsupported', error: new Error('Durable queue returned a non-JSON response') };
       }
@@ -183,7 +191,8 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
 
     const detail = await readResponseBody(() => response.text(), controller?.signal ?? null).catch(() => '');
     const error = new Error(`Durable queue admission failed (${response.status})${detail ? `: ${detail}` : ''}`);
-    if (response.status === 405 || response.status === 501 || (response.status === 400 && /(?:old|legacy|unsupported).*schema|schema.*(?:old|legacy|unsupported)/i.test(detail))) {
+    if (isCurrentAdmissionRuntime(input, requestGeneration)
+      && (response.status === 405 || response.status === 501 || (response.status === 400 && /(?:old|legacy|unsupported).*schema|schema.*(?:old|legacy|unsupported)/i.test(detail)))) {
       unsupportedRuntimes.set(input.runtimeKey, Date.now());
       return { outcome: 'unsupported', error };
     }
@@ -193,7 +202,7 @@ async function admitToDurableQueueOnce(input: QueueAdmissionInput, requestGenera
     if (response.status === 408 || response.status >= 500) {
       return { outcome: 'ambiguous', error: markAmbiguousTransportFailure(error) };
     }
-    if (response.status === 404 && !/session.*not.?found|sessionnotfound/i.test(detail)) {
+    if (isCurrentAdmissionRuntime(input, requestGeneration) && response.status === 404 && !/session.*not.?found|sessionnotfound/i.test(detail)) {
       unsupportedRuntimes.set(input.runtimeKey, Date.now());
       return { outcome: 'unsupported', error };
     }
