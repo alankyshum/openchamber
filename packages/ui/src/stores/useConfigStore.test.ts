@@ -3227,6 +3227,25 @@ describe('stale Auto selection', () => {
     expect(updates).toBe(1);
     expect(useSelectionStore.getState().getSessionModelSelection(sessionId)).toEqual({ providerId: 'live', modelId: 'live-model' });
   });
+
+  test('a fresh draft skips unavailable settings and project Auto defaults', () => {
+    useUIStore.setState({ routingFeatureAvailable: true });
+    useRoutingStore.setState({ loaded: true, available: true, autoReady: false, tokenPresent: false });
+    useConfigStore.setState({
+      currentProviderId: '',
+      currentModelId: '',
+      settingsDefaultModel: 'openchamber/auto',
+      providers: [provider('live')],
+      agents: [testAgent('build')],
+    });
+
+    useConfigStore.getState().applyDefaultModelAgentSelection();
+    expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'live', currentModelId: 'live-model' });
+
+    useConfigStore.setState({ currentProviderId: '', currentModelId: '', settingsDefaultModel: undefined });
+    useConfigStore.getState().applyDefaultModelAgentSelection({ projectDefaultModel: 'openchamber/auto' });
+    expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'live', currentModelId: 'live-model' });
+  });
 });
 
 describe('getModelMetadata limits', () => {
