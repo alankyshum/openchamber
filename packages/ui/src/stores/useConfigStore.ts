@@ -294,7 +294,7 @@ const resolveProviderModelSelection = ({
 
     if (settingsDefaultModel) {
         const parsed = parseModelString(settingsDefaultModel);
-        if (parsed) {
+        if (parsed && !isStaleAutoSelection(parsed.providerId, parsed.modelId)) {
             return {
                 providerId: parsed.providerId,
                 modelId: parsed.modelId,
