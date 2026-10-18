@@ -943,7 +943,7 @@ export const PlanView: React.FC<PlanViewProps> = ({ visible = true, savedProject
                         </div>
                       }
                     >
-                      <SimpleMarkdownRenderer content={content} className="typography-markdown-body" frontmatter="properties" enableFileReferences={false} allowRawHtml />
+                      <SimpleMarkdownRenderer content={content} className="typography-markdown-body" frontmatter="properties" enableFileReferences={false} />
                     </ErrorBoundary>
                   </div>
                 ) : (
